@@ -19,16 +19,31 @@ from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, TimeDistributed
 from tensorflow.keras.models import Model
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.mixed_precision import set_global_policy
 
 # Reduce TensorFlow logging
 tf.get_logger().setLevel('ERROR')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
+# Configure GPU memory growth to avoid OOM errors
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("GPU memory growth enabled")
+    except RuntimeError as e:
+        print(f"Error configuring GPU memory growth: {e}")
+
+# Enable mixed precision training for better memory efficiency
+set_global_policy('mixed_float16')
+print("Mixed precision training enabled")
+
 # Configuration
 DATASET_PATH = r'/kaggle/input/basketball-51/Basketball-51'
 SEQ_LENGTH = 30            # number of frames per clip
-IMG_SIZE = (112, 112)      # width, height
-BATCH_SIZE = 8
+IMG_SIZE = (96, 96)        # reduced from 112x112 to 96x96
+BATCH_SIZE = 4             # reduced from 8 to 4
 
 def print_section(title):
     """Print a formatted section title for better console readability."""
@@ -204,7 +219,7 @@ def create_data_generator(paths, labels, seq_length, img_size, num_classes, batc
             
             yield batch_X, batch_y
 
-def process_test_batch(paths, labels, seq_length, img_size, num_classes, batch_size=16):
+def process_test_batch(paths, labels, seq_length, img_size, num_classes, batch_size=8):
     """Process test data in small batches to avoid memory issues."""
     num_samples = len(paths)
     X_batches = []
@@ -263,21 +278,21 @@ def build_model(input_shape, num_classes):
     inp = Input(shape=input_shape)
     
     # First convolutional block
-    x = TimeDistributed(Conv2D(32, (3,3), activation='relu', padding='same'))(inp)
+    x = TimeDistributed(Conv2D(24, (3,3), activation='relu', padding='same'))(inp)
     x = TimeDistributed(MaxPooling2D((2,2)))(x)
     
     # Second convolutional block
-    x = TimeDistributed(Conv2D(64, (3,3), activation='relu', padding='same'))(x)
+    x = TimeDistributed(Conv2D(48, (3,3), activation='relu', padding='same'))(x)
     x = TimeDistributed(MaxPooling2D((2,2)))(x)
     
     # Third convolutional block (additional capacity)
-    x = TimeDistributed(Conv2D(128, (3,3), activation='relu', padding='same'))(x)
+    x = TimeDistributed(Conv2D(96, (3,3), activation='relu', padding='same'))(x)
     x = TimeDistributed(MaxPooling2D((2,2)))(x)
     
     # Flatten and feed to LSTM
     x = TimeDistributed(Flatten())(x)
-    x = LSTM(256, return_sequences=True)(x)
-    x = LSTM(256)(x)
+    x = LSTM(192, return_sequences=True)(x)
+    x = LSTM(192)(x)
     x = Dropout(0.5)(x)
     
     # Output layer
