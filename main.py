@@ -25,7 +25,7 @@ tf.get_logger().setLevel('ERROR')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 # Configuration
-DATASET_PATH = r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51'
+DATASET_PATH = r'/kaggle/input/basketball-51/Basketball-51'
 SEQ_LENGTH = 30            # number of frames per clip
 IMG_SIZE = (112, 112)      # width, height
 BATCH_SIZE = 8
