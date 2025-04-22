@@ -218,13 +218,22 @@ def visualize_training_history(history):
     # Show plot
     plt.show()
 
-def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='models'):
-    """Run the complete training pipeline."""
+def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='models', dataset_fraction=0.4):
+    """Run the complete training pipeline.
+    
+    Args:
+        epochs: Number of training epochs
+        test_size: Fraction of data to use for testing
+        random_state: Random seed for reproducibility
+        checkpoint_dir: Directory to save model checkpoints
+        dataset_fraction: Fraction of the full dataset to use (default: 0.4)
+    """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     log_file = f"basketball51_training_log_{timestamp}.txt"
     
     print_section("BASKETBALL-51 ACTION RECOGNITION TRAINING")
     print(f"Dataset Path: {DATASET_PATH}")
+    print(f"Dataset Fraction: {dataset_fraction*100:.0f}%")
     print(f"Epochs: {epochs}")
     print(f"Log File: {log_file}")
     
@@ -245,6 +254,35 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
         id2label = {idx: label for label, idx in label2id.items()}
         
         print(f"Found {len(video_paths)} videos across {num_classes} classes")
+        
+        # Sample only a fraction of the dataset to reduce memory usage
+        if dataset_fraction < 1.0:
+            # Use stratified sampling to maintain class distribution
+            from sklearn.model_selection import StratifiedShuffleSplit
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=1-dataset_fraction, random_state=random_state)
+            indices = list(range(len(video_paths)))
+            
+            for train_idx, _ in sss.split(indices, labels):
+                sampled_indices = train_idx
+            
+            # Get the sampled paths and labels
+            video_paths = [video_paths[i] for i in sampled_indices]
+            labels = [labels[i] for i in sampled_indices]
+            
+            print(f"Sampled {len(video_paths)} videos ({dataset_fraction*100:.0f}% of dataset)")
+            
+            # Count classes after sampling
+            class_counts = {}
+            for label in labels:
+                class_name = id2label[label]
+                if class_name in class_counts:
+                    class_counts[class_name] += 1
+                else:
+                    class_counts[class_name] = 1
+            
+            print("Sampled dataset class distribution:")
+            for class_name, count in class_counts.items():
+                print(f"  - {class_name}: {count} videos")
         
         # Split data into train and test sets
         train_p, test_p, train_l, test_l = train_test_split(
@@ -456,6 +494,8 @@ def main():
                         help='Path to saved model for testing (required for test mode)')
     parser.add_argument('--video_path', type=str, default=None,
                         help='Path to video file for testing (optional)')
+    parser.add_argument('--dataset_fraction', type=float, default=0.4,
+                        help='Fraction of the dataset to use (default: 0.4)')
     
     args = parser.parse_args()
     
@@ -463,7 +503,8 @@ def main():
         model, history, _ = train_model(
             epochs=args.epochs,
             test_size=args.test_size,
-            checkpoint_dir=args.checkpoint_dir
+            checkpoint_dir=args.checkpoint_dir,
+            dataset_fraction=args.dataset_fraction
         )
         
         # For 'both' mode, use the trained model for testing
