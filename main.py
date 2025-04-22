@@ -153,6 +153,111 @@ def prepare_data(paths, labels, seq_length, img_size, num_classes):
     
     return X, y
 
+def create_data_generator(paths, labels, seq_length, img_size, num_classes, batch_size):
+    """Create a generator that yields batches of data to reduce memory usage.
+    
+    This generator processes videos in small batches instead of loading all into memory at once.
+    """
+    num_samples = len(paths)
+    indices = np.arange(num_samples)
+    
+    # Convert labels to one-hot encoding
+    y_categorical = to_categorical(labels, num_classes)
+    
+    while True:
+        # Shuffle indices each epoch
+        np.random.shuffle(indices)
+        
+        # Process in batches
+        for start_idx in range(0, num_samples, batch_size):
+            batch_indices = indices[start_idx:start_idx + batch_size]
+            
+            # Initialize batch arrays
+            batch_X_rgb = []
+            batch_X_flow = []
+            batch_y = []
+            
+            # Process each video in the batch
+            for i in batch_indices:
+                try:
+                    frames = extract_frames(paths[i], seq_length, img_size)
+                    flow = compute_optical_flow_sequence(frames)
+                    batch_X_rgb.append(frames)
+                    batch_X_flow.append(flow)
+                    batch_y.append(y_categorical[i])
+                except Exception as e:
+                    print(f"Error processing {paths[i]}: {str(e)}")
+                    # Skip this sample
+                    continue
+            
+            if len(batch_X_rgb) == 0:
+                # Skip empty batches
+                continue
+                
+            # Convert to numpy arrays
+            batch_X_rgb = np.array(batch_X_rgb)
+            batch_X_flow = np.array(batch_X_flow)
+            
+            # Fuse modalities along channel axis: (B, T, H, W, 3+2)
+            batch_X = np.concatenate([batch_X_rgb, batch_X_flow], axis=-1)
+            batch_y = np.array(batch_y)
+            
+            yield batch_X, batch_y
+
+def process_test_batch(paths, labels, seq_length, img_size, num_classes, batch_size=16):
+    """Process test data in small batches to avoid memory issues."""
+    num_samples = len(paths)
+    X_batches = []
+    y_batches = []
+    
+    # Convert labels to one-hot encoding
+    y_categorical = to_categorical(labels, num_classes)
+    
+    # Process in batches
+    for start_idx in tqdm(range(0, num_samples, batch_size), desc="Processing test data"):
+        end_idx = min(start_idx + batch_size, num_samples)
+        batch_paths = paths[start_idx:end_idx]
+        batch_labels = y_categorical[start_idx:end_idx]
+        
+        # Initialize batch arrays
+        batch_X_rgb = []
+        batch_X_flow = []
+        batch_y = []
+        
+        # Process each video in the batch
+        for i, (vp, lbl) in enumerate(zip(batch_paths, batch_labels)):
+            try:
+                frames = extract_frames(vp, seq_length, img_size)
+                flow = compute_optical_flow_sequence(frames)
+                batch_X_rgb.append(frames)
+                batch_X_flow.append(flow)
+                batch_y.append(lbl)
+            except Exception as e:
+                print(f"Error processing {vp}: {str(e)}")
+                # Skip this sample
+                continue
+        
+        if len(batch_X_rgb) == 0:
+            # Skip empty batches
+            continue
+            
+        # Convert to numpy arrays
+        batch_X_rgb = np.array(batch_X_rgb)
+        batch_X_flow = np.array(batch_X_flow)
+        
+        # Fuse modalities along channel axis: (B, T, H, W, 3+2)
+        batch_X = np.concatenate([batch_X_rgb, batch_X_flow], axis=-1)
+        batch_y = np.array(batch_y)
+        
+        X_batches.append(batch_X)
+        y_batches.append(batch_y)
+    
+    # Concatenate all batches (this is smaller than the original dataset)
+    X_test = np.concatenate(X_batches, axis=0) if X_batches else np.array([])
+    y_test = np.concatenate(y_batches, axis=0) if y_batches else np.array([])
+    
+    return X_test, y_test
+
 def build_model(input_shape, num_classes):
     """Define a CNN-LSTM model for spatio-temporal classification."""
     inp = Input(shape=input_shape)
@@ -295,15 +400,25 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
         print(f"Training set: {len(train_p)} videos")
         print(f"Test set: {len(test_p)} videos")
         
-        # Prepare data
+        # Calculate steps per epoch
+        steps_per_epoch = len(train_p) // BATCH_SIZE
+        validation_steps = max(1, len(test_p) // BATCH_SIZE)
+        
         print_section("DATA PROCESSING")
-        print("Preparing training data (extracting frames and computing optical flow)...")
-        X_train, y_train = prepare_data(train_p, train_l, SEQ_LENGTH, IMG_SIZE, num_classes)
+        print("Using memory-efficient data generator for training data")
         
-        print("Preparing test data (extracting frames and computing optical flow)...")
-        X_test, y_test = prepare_data(test_p, test_l, SEQ_LENGTH, IMG_SIZE, num_classes)
+        # Create data generators instead of loading all data at once
+        train_generator = create_data_generator(
+            train_p, train_l, SEQ_LENGTH, IMG_SIZE, num_classes, BATCH_SIZE
+        )
         
-        print(f"Training data shape: {X_train.shape}")
+        # For the test set, we'll process it in batches but keep it in memory
+        # since it's smaller and we need it for final evaluation
+        print("Processing test data in batches...")
+        X_test, y_test = process_test_batch(
+            test_p, test_l, SEQ_LENGTH, IMG_SIZE, num_classes
+        )
+        
         print(f"Test data shape: {X_test.shape}")
         
         # Build model
@@ -338,11 +453,12 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
         print(f"Starting training for {epochs} epochs...")
         start_time = time.time()
         
+        # Use fit with generator
         history = model.fit(
-            X_train, y_train,
+            train_generator,
+            steps_per_epoch=steps_per_epoch,
             validation_data=(X_test, y_test),
             epochs=epochs,
-            batch_size=BATCH_SIZE,
             callbacks=callbacks
         )
         
