@@ -430,7 +430,7 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
         # Callbacks
         callbacks = [
             ModelCheckpoint(
-                os.path.join(checkpoint_dir, f'best_model_{timestamp}.h5'),
+                os.path.join(checkpoint_dir, f'best_model_{timestamp}.keras'),
                 save_best_only=True,
                 monitor='val_accuracy',
                 mode='max'
@@ -473,7 +473,7 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
         print(f"Test Accuracy: {acc:.4f}")
         
         # Save final model
-        final_model_path = os.path.join(checkpoint_dir, f'final_model_{timestamp}.h5')
+        final_model_path = os.path.join(checkpoint_dir, f'final_model_{timestamp}.keras')
         model.save(final_model_path)
         print(f"Final model saved to {final_model_path}")
         
@@ -626,7 +626,7 @@ def main():
         # For 'both' mode, use the trained model for testing
         if args.mode == 'both' and model is not None:
             # In 'both' mode, we use the final model we just trained
-            model_path = os.path.join(args.checkpoint_dir, 'final_model.h5')
+            model_path = os.path.join(args.checkpoint_dir, f'final_model_{timestamp}.keras')
             test_on_video(model_path, args.video_path)
     
     elif args.mode == 'test':
