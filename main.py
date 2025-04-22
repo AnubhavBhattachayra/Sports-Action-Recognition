@@ -218,7 +218,7 @@ def visualize_training_history(history):
     # Show plot
     plt.show()
 
-def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='models', dataset_fraction=0.4):
+def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='models', dataset_fraction=0.3):
     """Run the complete training pipeline.
     
     Args:
@@ -226,7 +226,7 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
         test_size: Fraction of data to use for testing
         random_state: Random seed for reproducibility
         checkpoint_dir: Directory to save model checkpoints
-        dataset_fraction: Fraction of the full dataset to use (default: 0.4)
+        dataset_fraction: Fraction of the full dataset to use (default: 0.3)
     """
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     log_file = f"basketball51_training_log_{timestamp}.txt"
@@ -494,8 +494,8 @@ def main():
                         help='Path to saved model for testing (required for test mode)')
     parser.add_argument('--video_path', type=str, default=None,
                         help='Path to video file for testing (optional)')
-    parser.add_argument('--dataset_fraction', type=float, default=0.4,
-                        help='Fraction of the dataset to use (default: 0.4)')
+    parser.add_argument('--dataset_fraction', type=float, default=0.3,
+                        help='Fraction of the dataset to use (default: 0.3)')
     
     args = parser.parse_args()
     
