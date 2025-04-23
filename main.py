@@ -278,21 +278,21 @@ def build_model(input_shape, num_classes):
     inp = Input(shape=input_shape)
     
     # First convolutional block
-    x = TimeDistributed(Conv2D(24, (3,3), activation='relu', padding='same'))(inp)
+    x = TimeDistributed(Conv2D(32, (3,3), activation='relu', padding='same'))(inp)
     x = TimeDistributed(MaxPooling2D((2,2)))(x)
     
     # Second convolutional block
-    x = TimeDistributed(Conv2D(48, (3,3), activation='relu', padding='same'))(x)
+    x = TimeDistributed(Conv2D(64, (3,3), activation='relu', padding='same'))(x)
     x = TimeDistributed(MaxPooling2D((2,2)))(x)
     
     # Third convolutional block (additional capacity)
-    x = TimeDistributed(Conv2D(96, (3,3), activation='relu', padding='same'))(x)
+    x = TimeDistributed(Conv2D(128, (3,3), activation='relu', padding='same'))(x)
     x = TimeDistributed(MaxPooling2D((2,2)))(x)
     
     # Flatten and feed to LSTM
     x = TimeDistributed(Flatten())(x)
-    x = LSTM(192, return_sequences=True)(x)
-    x = LSTM(192)(x)
+    x = LSTM(256, return_sequences=True)(x)
+    x = LSTM(256)(x)
     x = Dropout(0.5)(x)
     
     # Output layer
