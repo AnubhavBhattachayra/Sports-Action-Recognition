@@ -16,10 +16,53 @@ from tqdm import tqdm
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, TimeDistributed, Flatten, LSTM, Dropout, Dense
+from tensorflow.keras.layers import BatchNormalization, Add, GlobalAveragePooling2D, Attention, Layer, MultiHeadAttention, LayerNormalization
 from tensorflow.keras.models import Model
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.mixed_precision import set_global_policy
+from sklearn.metrics import f1_score
+
+# Define F1 Score metric for multi-class classification
+class F1ScoreMetric(tf.keras.metrics.Metric):
+    def __init__(self, name='f1_score', num_classes=8, **kwargs):
+        super(F1ScoreMetric, self).__init__(name=name, **kwargs)
+        self.num_classes = num_classes
+        self.true_positives = self.add_weight(name='tp', initializer='zeros', shape=(num_classes,))
+        self.false_positives = self.add_weight(name='fp', initializer='zeros', shape=(num_classes,))
+        self.false_negatives = self.add_weight(name='fn', initializer='zeros', shape=(num_classes,))
+        
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.argmax(y_true, axis=-1)
+        y_pred = tf.argmax(y_pred, axis=-1)
+        
+        # Convert to one-hot for per-class metrics
+        y_true_one_hot = tf.one_hot(y_true, self.num_classes)
+        y_pred_one_hot = tf.one_hot(y_pred, self.num_classes)
+        
+        # Calculate true positives, false positives, false negatives
+        true_pos = tf.reduce_sum(y_true_one_hot * y_pred_one_hot, axis=0)
+        false_pos = tf.reduce_sum(y_pred_one_hot * (1 - y_true_one_hot), axis=0)
+        false_neg = tf.reduce_sum(y_true_one_hot * (1 - y_pred_one_hot), axis=0)
+        
+        # Update running variables
+        self.true_positives.assign_add(true_pos)
+        self.false_positives.assign_add(false_pos)
+        self.false_negatives.assign_add(false_neg)
+        
+    def result(self):
+        # Calculate F1 score
+        precision = self.true_positives / (self.true_positives + self.false_positives + tf.keras.backend.epsilon())
+        recall = self.true_positives / (self.true_positives + self.false_negatives + tf.keras.backend.epsilon())
+        f1 = 2 * precision * recall / (precision + recall + tf.keras.backend.epsilon())
+        
+        # Average F1 score across all classes (macro averaging)
+        return tf.reduce_mean(f1)
+    
+    def reset_state(self):
+        self.true_positives.assign(tf.zeros_like(self.true_positives))
+        self.false_positives.assign(tf.zeros_like(self.false_positives))
+        self.false_negatives.assign(tf.zeros_like(self.false_negatives))
 
 # Reduce TensorFlow logging
 tf.get_logger().setLevel('ERROR')
@@ -274,45 +317,69 @@ def process_test_batch(paths, labels, seq_length, img_size, num_classes, batch_s
     return X_test, y_test
 
 def build_model(input_shape, num_classes):
-    """Define a CNN-LSTM model for spatio-temporal classification."""
+    """Define an improved CNN-LSTM model with residual connections and attention mechanism."""
     inp = Input(shape=input_shape)
     
-    # First convolutional block
-    x = TimeDistributed(Conv2D(32, (3,3), activation='relu', padding='same'))(inp)
-    x = TimeDistributed(MaxPooling2D((2,2)))(x)
+    # First convolutional block with residual connection
+    conv1 = TimeDistributed(Conv2D(32, (3,3), activation='relu', padding='same'))(inp)
+    conv1 = TimeDistributed(BatchNormalization())(conv1)
+    pool1 = TimeDistributed(MaxPooling2D((2,2)))(conv1)
     
-    # Second convolutional block
-    x = TimeDistributed(Conv2D(64, (3,3), activation='relu', padding='same'))(x)
-    x = TimeDistributed(MaxPooling2D((2,2)))(x)
+    # Second convolutional block with residual connection
+    conv2 = TimeDistributed(Conv2D(64, (3,3), activation='relu', padding='same'))(pool1)
+    conv2 = TimeDistributed(BatchNormalization())(conv2)
+    conv2_residual = TimeDistributed(Conv2D(64, (3,3), activation='relu', padding='same'))(conv2)
+    conv2_residual = TimeDistributed(BatchNormalization())(conv2_residual)
+    conv2 = TimeDistributed(Add())([conv2, conv2_residual])  # Add residual connection
+    pool2 = TimeDistributed(MaxPooling2D((2,2)))(conv2)
     
-    # Third convolutional block (additional capacity)
-    x = TimeDistributed(Conv2D(128, (3,3), activation='relu', padding='same'))(x)
-    x = TimeDistributed(MaxPooling2D((2,2)))(x)
+    # Third convolutional block with residual connection
+    conv3 = TimeDistributed(Conv2D(128, (3,3), activation='relu', padding='same'))(pool2)
+    conv3 = TimeDistributed(BatchNormalization())(conv3)
+    conv3_residual = TimeDistributed(Conv2D(128, (3,3), activation='relu', padding='same'))(conv3)
+    conv3_residual = TimeDistributed(BatchNormalization())(conv3_residual)
+    conv3 = TimeDistributed(Add())([conv3, conv3_residual])  # Add residual connection
+    pool3 = TimeDistributed(MaxPooling2D((2,2)))(conv3)
     
-    # Flatten and feed to LSTM
-    x = TimeDistributed(Flatten())(x)
-    x = LSTM(256, return_sequences=True)(x)
-    x = LSTM(256)(x)
-    x = Dropout(0.5)(x)
+    # Global average pooling to reduce spatial dimensions
+    gap = TimeDistributed(GlobalAveragePooling2D())(pool3)
+    
+    # LSTM layers with attention mechanism
+    lstm1 = LSTM(256, return_sequences=True)(gap)
+    lstm1 = LayerNormalization()(lstm1)
+    
+    # Self-attention mechanism
+    attention = MultiHeadAttention(num_heads=4, key_dim=64)(lstm1, lstm1)
+    attention = Add()([attention, lstm1])  # Residual connection
+    attention = LayerNormalization()(attention)
+    
+    # Final LSTM layer
+    lstm2 = LSTM(256)(attention)
+    lstm2 = LayerNormalization()(lstm2)
+    drop = Dropout(0.5)(lstm2)
     
     # Output layer
-    out = Dense(num_classes, activation='softmax')(x)
+    out = Dense(num_classes, activation='softmax')(drop)
     
     model = Model(inputs=inp, outputs=out)
+    
+    # Create F1 score metric
+    f1_metric = F1ScoreMetric(num_classes=num_classes)
+    
     model.compile(
-        optimizer='adam',
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),  # Slightly lower learning rate
         loss='categorical_crossentropy',
-        metrics=['accuracy']
+        metrics=['accuracy', f1_metric]
     )
     
     return model
 
 def visualize_training_history(history):
     """Plot training and validation metrics."""
-    plt.figure(figsize=(12, 5))
+    plt.figure(figsize=(15, 5))
     
     # Plot accuracy
-    plt.subplot(1, 2, 1)
+    plt.subplot(1, 3, 1)
     plt.plot(history.history['accuracy'], label='Train Accuracy')
     plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
     plt.title('Model Accuracy')
@@ -321,12 +388,21 @@ def visualize_training_history(history):
     plt.legend()
     
     # Plot loss
-    plt.subplot(1, 2, 2)
+    plt.subplot(1, 3, 2)
     plt.plot(history.history['loss'], label='Train Loss')
     plt.plot(history.history['val_loss'], label='Validation Loss')
     plt.title('Model Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
+    plt.legend()
+    
+    # Plot F1 score
+    plt.subplot(1, 3, 3)
+    plt.plot(history.history['f1_score'], label='Train F1 Score')
+    plt.plot(history.history['val_f1_score'], label='Validation F1 Score')
+    plt.title('Model F1 Score')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1 Score')
     plt.legend()
     
     plt.tight_layout()
@@ -483,9 +559,10 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
         # Evaluate model
         print_section("EVALUATION")
         print("Evaluating model on test set...")
-        loss, acc = model.evaluate(X_test, y_test, batch_size=BATCH_SIZE)
+        loss, acc, f1 = model.evaluate(X_test, y_test, batch_size=BATCH_SIZE)
         print(f"Test Loss: {loss:.4f}")
         print(f"Test Accuracy: {acc:.4f}")
+        print(f"Test F1 Score: {f1:.4f}")
         
         # Save final model
         final_model_path = os.path.join(checkpoint_dir, f'final_model_{timestamp}.keras')
@@ -505,7 +582,9 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
             'Train_Accuracy': history.history['accuracy'],
             'Val_Accuracy': history.history['val_accuracy'],
             'Train_Loss': history.history['loss'],
-            'Val_Loss': history.history['val_loss']
+            'Val_Loss': history.history['val_loss'],
+            'Train_F1': history.history['f1_score'],
+            'Val_F1': history.history['val_f1_score']
         })
         
         metrics_file = f'training_metrics_{timestamp}.csv'
@@ -531,7 +610,8 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
             
             f.write("RESULTS\n")
             f.write(f"Final Test Loss: {loss:.4f}\n")
-            f.write(f"Final Test Accuracy: {acc:.4f}\n\n")
+            f.write(f"Final Test Accuracy: {acc:.4f}\n")
+            f.write(f"Final Test F1 Score: {f1:.4f}\n\n")
             
             f.write("CLASS DISTRIBUTION\n")
             for class_name, count in class_counts.items():
@@ -543,6 +623,8 @@ def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='model
             f.write(f"Validation Accuracy: {final_epoch['Val_Accuracy']:.4f}\n")
             f.write(f"Training Loss: {final_epoch['Train_Loss']:.4f}\n")
             f.write(f"Validation Loss: {final_epoch['Val_Loss']:.4f}\n")
+            f.write(f"Training F1 Score: {final_epoch['Train_F1']:.4f}\n")
+            f.write(f"Validation F1 Score: {final_epoch['Val_F1']:.4f}\n")
         
         print(f"Training summary saved to {log_file}")
         print_section("TRAINING COMPLETE")
