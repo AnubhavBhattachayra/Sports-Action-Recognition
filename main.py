@@ -17,6 +17,7 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, TimeDistributed, Flatten, LSTM, Dropout, Dense
 from tensorflow.keras.layers import BatchNormalization, Add, GlobalAveragePooling2D, Attention, Layer, MultiHeadAttention, LayerNormalization
+from tensorflow.keras.layers import Reshape, Embedding, Concatenate
 from tensorflow.keras.models import Model
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
@@ -87,6 +88,10 @@ DATASET_PATH = r'/kaggle/input/basketball-51/Basketball-51'
 SEQ_LENGTH = 30            # number of frames per clip
 IMG_SIZE = (96, 96)        # reduced from 112x112 to 96x96
 BATCH_SIZE = 4             # reduced from 8 to 4
+PATCH_SIZE = 16            # for ViT
+EMBED_DIM = 128            # embedding dimension for ViT
+NUM_HEADS = 4              # number of attention heads
+NUM_TRANSFORMER_LAYERS = 4  # number of transformer blocks
 
 def print_section(title):
     """Print a formatted section title for better console readability."""
@@ -316,58 +321,193 @@ def process_test_batch(paths, labels, seq_length, img_size, num_classes, batch_s
     
     return X_test, y_test
 
+class PatchEncoder(Layer):
+    """
+    Breaks image into patches, linearly embeds each patch, adds positional embeddings.
+    Used in the Vision Transformer architecture.
+    """
+    def __init__(self, num_patches, embedding_dim, **kwargs):
+        super(PatchEncoder, self).__init__(**kwargs)
+        self.num_patches = num_patches
+        self.embedding_dim = embedding_dim
+        self.projection = Dense(embedding_dim)
+        self.position_embedding = Embedding(
+            input_dim=num_patches, output_dim=embedding_dim
+        )
+
+    def call(self, patch):
+        positions = tf.range(start=0, limit=self.num_patches, delta=1)
+        embedded = self.projection(patch)
+        encoded = embedded + self.position_embedding(positions)
+        return encoded
+    
+    def get_config(self):
+        config = super(PatchEncoder, self).get_config()
+        config.update({
+            'num_patches': self.num_patches,
+            'embedding_dim': self.embedding_dim,
+        })
+        return config
+
+def mlp(x, hidden_units, dropout_rate):
+    """MLP block for Transformer."""
+    for units in hidden_units:
+        x = Dense(units, activation=tf.nn.gelu)(x)
+        x = Dropout(dropout_rate)(x)
+    return x
+
+def transformer_encoder_block(inputs, num_heads, embed_dim, ff_dim, dropout_rate=0.1):
+    """Transformer encoder block with multi-head attention."""
+    # Normalization and Multi-head Attention
+    attention_output = LayerNormalization(epsilon=1e-6)(inputs)
+    attention_output = MultiHeadAttention(
+        num_heads=num_heads, key_dim=embed_dim // num_heads
+    )(attention_output, attention_output)
+    attention_output = Dropout(dropout_rate)(attention_output)
+    out1 = Add()([inputs, attention_output])
+    
+    # Feed Forward Network
+    ffn_output = LayerNormalization(epsilon=1e-6)(out1)
+    ffn_output = mlp(ffn_output, [ff_dim, embed_dim], dropout_rate)
+    return Add()([out1, ffn_output])
+
+def cross_attention_block(queries, keys_values, num_heads, embed_dim, dropout_rate=0.1):
+    """Cross-attention block to fuse information from two modalities."""
+    # Normalization and Cross-Attention
+    norm_q = LayerNormalization(epsilon=1e-6)(queries)
+    norm_kv = LayerNormalization(epsilon=1e-6)(keys_values)
+    
+    attention_output = MultiHeadAttention(
+        num_heads=num_heads, key_dim=embed_dim // num_heads
+    )(query=norm_q, key=norm_kv, value=norm_kv)
+    
+    attention_output = Dropout(dropout_rate)(attention_output)
+    out1 = Add()([queries, attention_output])
+    
+    # Feed Forward Network
+    ffn_output = LayerNormalization(epsilon=1e-6)(out1)
+    ffn_output = mlp(ffn_output, [embed_dim * 2, embed_dim], dropout_rate)
+    return Add()([out1, ffn_output])
+
 def build_model(input_shape, num_classes):
-    """Define an improved CNN-LSTM model with residual connections and attention mechanism."""
+    """
+    Build a dual-stream Vision Transformer (ViT) model with cross-modal fusion 
+    for basketball action recognition using RGB and optical flow modalities.
+    """
+    # Input layer for RGB+Flow (5 channels)
     inp = Input(shape=input_shape)
     
-    # First convolutional block with residual connection
-    conv1 = TimeDistributed(Conv2D(32, (3,3), activation='relu', padding='same'))(inp)
-    conv1 = TimeDistributed(BatchNormalization())(conv1)
-    pool1 = TimeDistributed(MaxPooling2D((2,2)))(conv1)
+    # Separate RGB and optical flow channels
+    rgb_frames = tf.slice(inp, [0, 0, 0, 0, 0], [-1, -1, -1, -1, 3])
+    flow_frames = tf.slice(inp, [0, 0, 0, 0, 3], [-1, -1, -1, -1, 2])
     
-    # Second convolutional block with residual connection
-    conv2 = TimeDistributed(Conv2D(64, (3,3), activation='relu', padding='same'))(pool1)
-    conv2 = TimeDistributed(BatchNormalization())(conv2)
-    conv2_residual = TimeDistributed(Conv2D(64, (3,3), activation='relu', padding='same'))(conv2)
-    conv2_residual = TimeDistributed(BatchNormalization())(conv2_residual)
-    conv2 = TimeDistributed(Add())([conv2, conv2_residual])  # Add residual connection
-    pool2 = TimeDistributed(MaxPooling2D((2,2)))(conv2)
+    # Calculate number of patches
+    input_h, input_w = input_shape[1], input_shape[2]
+    num_patches = (input_h // PATCH_SIZE) * (input_w // PATCH_SIZE)
+    patch_dim = PATCH_SIZE * PATCH_SIZE
     
-    # Third convolutional block with residual connection
-    conv3 = TimeDistributed(Conv2D(128, (3,3), activation='relu', padding='same'))(pool2)
-    conv3 = TimeDistributed(BatchNormalization())(conv3)
-    conv3_residual = TimeDistributed(Conv2D(128, (3,3), activation='relu', padding='same'))(conv3)
-    conv3_residual = TimeDistributed(BatchNormalization())(conv3_residual)
-    conv3 = TimeDistributed(Add())([conv3, conv3_residual])  # Add residual connection
-    pool3 = TimeDistributed(MaxPooling2D((2,2)))(conv3)
+    # Process each frame in the sequence
+    sequence_length = input_shape[0]
     
-    # Global average pooling to reduce spatial dimensions
-    gap = TimeDistributed(GlobalAveragePooling2D())(pool3)
+    # RGB Stream - Extract patches from each frame
+    rgb_patches_list = []
+    for i in range(sequence_length):
+        # Extract frame i and flatten patches
+        rgb_frame = tf.gather(rgb_frames, i, axis=1)
+        
+        # Convert to patches
+        patches = tf.image.extract_patches(
+            images=rgb_frame,
+            sizes=[1, PATCH_SIZE, PATCH_SIZE, 1],
+            strides=[1, PATCH_SIZE, PATCH_SIZE, 1],
+            rates=[1, 1, 1, 1],
+            padding="VALID"
+        )
+        
+        # Reshape to [batch_size, num_patches, patch_dim * 3]
+        flat_patches = tf.reshape(patches, [-1, num_patches, patch_dim * 3])
+        rgb_patches_list.append(flat_patches)
     
-    # LSTM layers with attention mechanism
-    lstm1 = LSTM(256, return_sequences=True)(gap)
-    lstm1 = LayerNormalization()(lstm1)
+    # Stack temporal dimension
+    rgb_patches = tf.stack(rgb_patches_list, axis=1)
+    # Reshape to [batch_size * sequence_length, num_patches, patch_dim * 3]
+    rgb_patches = tf.reshape(rgb_patches, [-1, num_patches, patch_dim * 3])
     
-    # Self-attention mechanism
-    attention = MultiHeadAttention(num_heads=4, key_dim=64)(lstm1, lstm1)
-    attention = Add()([attention, lstm1])  # Residual connection
-    attention = LayerNormalization()(attention)
+    # Flow Stream - Extract patches from each frame
+    flow_patches_list = []
+    for i in range(sequence_length):
+        # Extract frame i and flatten patches
+        flow_frame = tf.gather(flow_frames, i, axis=1)
+        
+        # Convert to patches
+        patches = tf.image.extract_patches(
+            images=flow_frame,
+            sizes=[1, PATCH_SIZE, PATCH_SIZE, 1],
+            strides=[1, PATCH_SIZE, PATCH_SIZE, 1],
+            rates=[1, 1, 1, 1],
+            padding="VALID"
+        )
+        
+        # Reshape to [batch_size, num_patches, patch_dim * 2]
+        flat_patches = tf.reshape(patches, [-1, num_patches, patch_dim * 2])
+        flow_patches_list.append(flat_patches)
     
-    # Final LSTM layer
-    lstm2 = LSTM(256)(attention)
-    lstm2 = LayerNormalization()(lstm2)
-    drop = Dropout(0.5)(lstm2)
+    # Stack temporal dimension
+    flow_patches = tf.stack(flow_patches_list, axis=1)
+    # Reshape to [batch_size * sequence_length, num_patches, patch_dim * 2]
+    flow_patches = tf.reshape(flow_patches, [-1, num_patches, patch_dim * 2])
     
-    # Output layer
-    out = Dense(num_classes, activation='softmax')(drop)
+    # Encode patches
+    rgb_encoded_patches = PatchEncoder(num_patches, EMBED_DIM)(rgb_patches)
+    flow_encoded_patches = PatchEncoder(num_patches, EMBED_DIM)(flow_patches)
+    
+    # Apply transformer encoder blocks to each modality
+    rgb_x = rgb_encoded_patches
+    for _ in range(NUM_TRANSFORMER_LAYERS // 2):
+        rgb_x = transformer_encoder_block(rgb_x, NUM_HEADS, EMBED_DIM, EMBED_DIM * 2)
+    
+    flow_x = flow_encoded_patches
+    for _ in range(NUM_TRANSFORMER_LAYERS // 2):
+        flow_x = transformer_encoder_block(flow_x, NUM_HEADS, EMBED_DIM, EMBED_DIM * 2)
+    
+    # Cross-modal fusion (RGB as query, flow as key/value)
+    fused_features = cross_attention_block(rgb_x, flow_x, NUM_HEADS, EMBED_DIM)
+    
+    # Apply more transformer layers to fused features
+    for _ in range(NUM_TRANSFORMER_LAYERS // 2):
+        fused_features = transformer_encoder_block(fused_features, NUM_HEADS, EMBED_DIM, EMBED_DIM * 2)
+    
+    # Global pooling
+    pooled_output = tf.reduce_mean(fused_features, axis=1)  # Global average pooling
+    
+    # Reshape back to include sequence dimension [batch_size, sequence_length, EMBED_DIM]
+    pooled_output = tf.reshape(pooled_output, [-1, sequence_length, EMBED_DIM])
+    
+    # Temporal modeling with LSTM
+    x = LSTM(256, return_sequences=True)(pooled_output)
+    x = LayerNormalization()(x)
+    x = LSTM(256)(x)
+    x = LayerNormalization()(x)
+    x = Dropout(0.5)(x)
+    
+    # Classification head
+    x = Dense(512, activation='gelu')(x)
+    x = Dropout(0.3)(x)
+    out = Dense(num_classes, activation='softmax')(x)
     
     model = Model(inputs=inp, outputs=out)
     
     # Create F1 score metric
     f1_metric = F1ScoreMetric(num_classes=num_classes)
     
+    # Compile with cosine decay learning rate as per the document
+    initial_learning_rate = 0.0001
+    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate, decay_steps=50 * (input_shape[0] // BATCH_SIZE)
+    )
+    
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),  # Slightly lower learning rate
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
         loss='categorical_crossentropy',
         metrics=['accuracy', f1_metric]
     )
