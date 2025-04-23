@@ -554,11 +554,11 @@ def visualize_training_history(history):
     # Show plot
     plt.show()
 
-def train_model(epochs=20, test_size=0.2, random_state=42, checkpoint_dir='models', dataset_fraction=0.3):
+def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='models', dataset_fraction=0.3):
     """Run the complete training pipeline.
     
     Args:
-        epochs: Number of training epochs
+        epochs: Number of training epochs (default: 40)
         test_size: Fraction of data to use for testing
         random_state: Random seed for reproducibility
         checkpoint_dir: Directory to save model checkpoints
@@ -837,8 +837,8 @@ def main():
     parser = argparse.ArgumentParser(description='Basketball-51 Action Recognition')
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'both'],
                         help='Mode: train model, test model, or both (default: train)')
-    parser.add_argument('--epochs', type=int, default=20,
-                        help='Number of training epochs (default: 20)')
+    parser.add_argument('--epochs', type=int, default=40,
+                        help='Number of training epochs (default: 40)')
     parser.add_argument('--test_size', type=float, default=0.2,
                         help='Proportion of data to use for testing (default: 0.2)')
     parser.add_argument('--checkpoint_dir', type=str, default='models',
