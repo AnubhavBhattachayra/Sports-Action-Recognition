@@ -134,7 +134,7 @@ def get_video_paths(dataset_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Precompute Optical Flow for Basketball-51 dataset.")
-    parser.add_argument('--dataset_path', type=str, default='/kaggle/input/basketball-51/Basketball-51',
+    parser.add_argument('--dataset_path', type=str, default=r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51',
                         help='Path to the root directory of the Basketball-51 dataset.')
     parser.add_argument('--output_path', type=str, default='./flow_data',
                         help='Path to the directory where flow .npy files will be saved.')
