@@ -16,6 +16,7 @@ import argparse
 from multiprocessing import Pool, cpu_count
 from functools import partial
 from tqdm import tqdm
+import random
 
 # --- Configuration (should match training script) ---
 SEQ_LENGTH = 50
@@ -148,6 +149,15 @@ def main():
     if not video_paths:
         return # Exit if no videos found
 
+    # --- Added: Select 50% of the videos ---
+    SEED = 42 # Define a fixed seed
+    random.seed(SEED) # Set the random seed
+    num_videos_to_use = int(len(video_paths) * 0.50)
+    random.shuffle(video_paths) # Shuffle the list in place (now deterministic)
+    video_paths_subset = video_paths[:num_videos_to_use]
+    print(f"Using a 50% subset: {len(video_paths_subset)} videos out of {len(video_paths)} total.")
+    # --- End Added Section ---
+
     # Create the main output directory
     os.makedirs(args.output_path, exist_ok=True)
 
@@ -163,9 +173,9 @@ def main():
     failed_videos = []
     with Pool(processes=args.workers) as pool:
         # Use tqdm for progress bar
-        with tqdm(total=len(video_paths), desc="Computing Flow") as pbar:
+        with tqdm(total=len(video_paths_subset), desc="Computing Flow") as pbar: # Use subset length
             # Use imap_unordered for potentially better performance and progress updates
-            for video_path, success in pool.imap_unordered(process_func, video_paths):
+            for video_path, success in pool.imap_unordered(process_func, video_paths_subset): # Use subset
                 if success:
                     processed_count += 1
                 else:
@@ -173,7 +183,7 @@ def main():
                 pbar.update(1) # Update progress bar for each completed video
 
     print(f"\nFinished processing.")
-    print(f"Successfully processed and saved flow for {processed_count}/{len(video_paths)} videos.")
+    print(f"Successfully processed and saved flow for {processed_count}/{len(video_paths_subset)} videos.")
     if failed_videos:
         print(f"Failed to process {len(failed_videos)} videos:")
         # for vid in failed_videos:
