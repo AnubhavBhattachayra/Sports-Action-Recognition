@@ -23,6 +23,7 @@ from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.mixed_precision import set_global_policy
 from sklearn.metrics import f1_score
+from sklearn.utils.class_weight import compute_class_weight
 
 # Define F1 Score metric for multi-class classification
 class F1ScoreMetric(tf.keras.metrics.Metric):
@@ -495,6 +496,10 @@ def build_model(input_shape, num_classes):
     rgb_patches = Concatenate(axis=1)(rgb_patches_list)
     flow_patches = Concatenate(axis=1)(flow_patches_list)
     
+    # Add batch normalization for more stable training
+    rgb_patches = BatchNormalization()(rgb_patches)
+    flow_patches = BatchNormalization()(flow_patches)
+    
     # Encode patches
     rgb_encoded_patches = PatchEncoder(num_patches * sequence_length, EMBED_DIM)(rgb_patches)
     flow_encoded_patches = PatchEncoder(num_patches * sequence_length, EMBED_DIM)(flow_patches)
@@ -518,11 +523,16 @@ def build_model(input_shape, num_classes):
     # Global pooling
     pooled_output = GlobalAveragePooling1D()(fused_features)
     
-    # Reshape back to include sequence dimension [batch_size, sequence_length, EMBED_DIM]
-    reshaped_output = Reshape((1, -1))(pooled_output)
+    # Fixed dimension approach for LSTM - ensure pooled_output has proper dimensionality
+    # Using Dense to map to fixed-size representation for LSTM input
+    x = Dense(256, activation='gelu')(pooled_output)
+    x = BatchNormalization()(x)
+    
+    # Reshape for LSTM [batch_size, seq_length=1, features]
+    x = Reshape((1, 256))(x)
     
     # Temporal modeling with LSTM
-    x = LSTM(256, return_sequences=True)(reshaped_output)
+    x = LSTM(256, return_sequences=True)(x)
     x = LayerNormalization()(x)
     x = LSTM(256)(x)
     x = LayerNormalization()(x)
@@ -530,6 +540,7 @@ def build_model(input_shape, num_classes):
     
     # Classification head
     x = Dense(512, activation='gelu')(x)
+    x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
     out = Dense(num_classes, activation='softmax')(x)
     
@@ -538,14 +549,9 @@ def build_model(input_shape, num_classes):
     # Create F1 score metric
     f1_metric = F1ScoreMetric(num_classes=num_classes)
     
-    # Compile with cosine decay learning rate as per the document
-    initial_learning_rate = 0.0001
-    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate, decay_steps=50 * (input_shape[0] // BATCH_SIZE)
-    )
-    
+    # Use fixed learning rate instead of cosine decay to ensure model learns
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),  # Fixed learning rate
         loss='categorical_crossentropy',
         metrics=['accuracy', f1_metric]
     )
@@ -673,6 +679,14 @@ def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='model
         steps_per_epoch = len(train_p) // BATCH_SIZE
         validation_steps = max(1, len(test_p) // BATCH_SIZE)
         
+        # Compute class weights to handle imbalance
+        unique_classes = np.unique(labels)
+        class_weights = compute_class_weight(class_weight='balanced', classes=unique_classes, y=labels)
+        class_weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
+        print("\nUsing class weights to handle imbalance:")
+        for class_id, weight in class_weight_dict.items():
+            print(f"  - Class {id2label[class_id]}: {weight:.4f}")
+        
         print_section("DATA PROCESSING")
         print("Using memory-efficient data generator for training data")
         
@@ -696,7 +710,7 @@ def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='model
         model = build_model(input_shape, num_classes)
         model.summary()
         
-        # Callbacks
+        # Callbacks with increased patience
         callbacks = [
             ModelCheckpoint(
                 os.path.join(checkpoint_dir, f'best_model_{timestamp}.keras'),
@@ -706,13 +720,13 @@ def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='model
             ),
             EarlyStopping(
                 monitor='val_loss',
-                patience=5,
+                patience=8,  # Increased patience to avoid early stopping
                 restore_best_weights=True
             ),
             ReduceLROnPlateau(
                 monitor='val_loss',
-                factor=0.2,
-                patience=3,
+                factor=0.5,  # Gentler reduction
+                patience=5,   # More patience before reducing
                 min_lr=1e-6
             )
         ]
@@ -722,13 +736,14 @@ def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='model
         print(f"Starting training for {epochs} epochs...")
         start_time = time.time()
         
-        # Use fit with generator
+        # Use fit with generator and class weights
         history = model.fit(
             train_generator,
             steps_per_epoch=steps_per_epoch,
             validation_data=(X_test, y_test),
             epochs=epochs,
-            callbacks=callbacks
+            callbacks=callbacks,
+            class_weight=class_weight_dict  # Use class weights to handle imbalance
         )
         
         training_time = time.time() - start_time
