@@ -17,7 +17,7 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, TimeDistributed, Flatten, LSTM, Dropout, Dense
 from tensorflow.keras.layers import BatchNormalization, Add, GlobalAveragePooling2D, Attention, Layer, MultiHeadAttention, LayerNormalization
-from tensorflow.keras.layers import Reshape, Embedding, Concatenate
+from tensorflow.keras.layers import Reshape, Embedding, Concatenate, GlobalAveragePooling1D
 from tensorflow.keras.models import Model
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
@@ -389,6 +389,65 @@ def cross_attention_block(queries, keys_values, num_heads, embed_dim, dropout_ra
     ffn_output = mlp(ffn_output, [embed_dim * 2, embed_dim], dropout_rate)
     return Add()([out1, ffn_output])
 
+class ChannelSlicer(Layer):
+    """Custom layer to slice input tensor along the channel dimension."""
+    def __init__(self, start, size, **kwargs):
+        super(ChannelSlicer, self).__init__(**kwargs)
+        self.start = start
+        self.size = size
+        
+    def call(self, inputs):
+        return inputs[:, :, :, :, self.start:self.start+self.size]
+    
+    def get_config(self):
+        config = super(ChannelSlicer, self).get_config()
+        config.update({
+            'start': self.start,
+            'size': self.size
+        })
+        return config
+
+class PatchExtractor(Layer):
+    """Custom layer to extract patches from images."""
+    def __init__(self, patch_size, **kwargs):
+        super(PatchExtractor, self).__init__(**kwargs)
+        self.patch_size = patch_size
+        
+    def call(self, inputs):
+        # inputs shape: [batch_size, height, width, channels]
+        patches = tf.image.extract_patches(
+            images=inputs,
+            sizes=[1, self.patch_size, self.patch_size, 1],
+            strides=[1, self.patch_size, self.patch_size, 1],
+            rates=[1, 1, 1, 1],
+            padding="VALID"
+        )
+        return patches
+    
+    def get_config(self):
+        config = super(PatchExtractor, self).get_config()
+        config.update({
+            'patch_size': self.patch_size
+        })
+        return config
+
+class FrameSelector(Layer):
+    """Custom layer to select a specific frame from a sequence."""
+    def __init__(self, frame_index, **kwargs):
+        super(FrameSelector, self).__init__(**kwargs)
+        self.frame_index = frame_index
+        
+    def call(self, inputs):
+        # inputs shape: [batch_size, seq_len, height, width, channels]
+        return inputs[:, self.frame_index]
+    
+    def get_config(self):
+        config = super(FrameSelector, self).get_config()
+        config.update({
+            'frame_index': self.frame_index
+        })
+        return config
+
 def build_model(input_shape, num_classes):
     """
     Build a dual-stream Vision Transformer (ViT) model with cross-modal fusion 
@@ -398,8 +457,8 @@ def build_model(input_shape, num_classes):
     inp = Input(shape=input_shape)
     
     # Separate RGB and optical flow channels
-    rgb_frames = tf.slice(inp, [0, 0, 0, 0, 0], [-1, -1, -1, -1, 3])
-    flow_frames = tf.slice(inp, [0, 0, 0, 0, 3], [-1, -1, -1, -1, 2])
+    rgb_frames = ChannelSlicer(0, 3)(inp)
+    flow_frames = ChannelSlicer(3, 2)(inp)
     
     # Calculate number of patches
     input_h, input_w = input_shape[1], input_shape[2]
@@ -411,55 +470,34 @@ def build_model(input_shape, num_classes):
     
     # RGB Stream - Extract patches from each frame
     rgb_patches_list = []
-    for i in range(sequence_length):
-        # Extract frame i and flatten patches
-        rgb_frame = tf.gather(rgb_frames, i, axis=1)
-        
-        # Convert to patches
-        patches = tf.image.extract_patches(
-            images=rgb_frame,
-            sizes=[1, PATCH_SIZE, PATCH_SIZE, 1],
-            strides=[1, PATCH_SIZE, PATCH_SIZE, 1],
-            rates=[1, 1, 1, 1],
-            padding="VALID"
-        )
-        
-        # Reshape to [batch_size, num_patches, patch_dim * 3]
-        flat_patches = tf.reshape(patches, [-1, num_patches, patch_dim * 3])
-        rgb_patches_list.append(flat_patches)
-    
-    # Stack temporal dimension
-    rgb_patches = tf.stack(rgb_patches_list, axis=1)
-    # Reshape to [batch_size * sequence_length, num_patches, patch_dim * 3]
-    rgb_patches = tf.reshape(rgb_patches, [-1, num_patches, patch_dim * 3])
-    
-    # Flow Stream - Extract patches from each frame
     flow_patches_list = []
-    for i in range(sequence_length):
-        # Extract frame i and flatten patches
-        flow_frame = tf.gather(flow_frames, i, axis=1)
-        
-        # Convert to patches
-        patches = tf.image.extract_patches(
-            images=flow_frame,
-            sizes=[1, PATCH_SIZE, PATCH_SIZE, 1],
-            strides=[1, PATCH_SIZE, PATCH_SIZE, 1],
-            rates=[1, 1, 1, 1],
-            padding="VALID"
-        )
-        
-        # Reshape to [batch_size, num_patches, patch_dim * 2]
-        flat_patches = tf.reshape(patches, [-1, num_patches, patch_dim * 2])
-        flow_patches_list.append(flat_patches)
     
-    # Stack temporal dimension
-    flow_patches = tf.stack(flow_patches_list, axis=1)
-    # Reshape to [batch_size * sequence_length, num_patches, patch_dim * 2]
-    flow_patches = tf.reshape(flow_patches, [-1, num_patches, patch_dim * 2])
+    for i in range(sequence_length):
+        # Extract frame i from RGB sequence
+        rgb_frame = FrameSelector(i)(rgb_frames)
+        
+        # Extract patches
+        rgb_patch = PatchExtractor(PATCH_SIZE)(rgb_frame)
+        # Reshape to [batch_size, num_patches, patch_dim * 3]
+        rgb_patch_flat = Reshape((-1, patch_dim * 3))(rgb_patch)
+        rgb_patches_list.append(rgb_patch_flat)
+        
+        # Extract frame i from flow sequence
+        flow_frame = FrameSelector(i)(flow_frames)
+        
+        # Extract patches
+        flow_patch = PatchExtractor(PATCH_SIZE)(flow_frame)
+        # Reshape to [batch_size, num_patches, patch_dim * 2]
+        flow_patch_flat = Reshape((-1, patch_dim * 2))(flow_patch)
+        flow_patches_list.append(flow_patch_flat)
+    
+    # Concatenate all frames
+    rgb_patches = Concatenate(axis=1)(rgb_patches_list)
+    flow_patches = Concatenate(axis=1)(flow_patches_list)
     
     # Encode patches
-    rgb_encoded_patches = PatchEncoder(num_patches, EMBED_DIM)(rgb_patches)
-    flow_encoded_patches = PatchEncoder(num_patches, EMBED_DIM)(flow_patches)
+    rgb_encoded_patches = PatchEncoder(num_patches * sequence_length, EMBED_DIM)(rgb_patches)
+    flow_encoded_patches = PatchEncoder(num_patches * sequence_length, EMBED_DIM)(flow_patches)
     
     # Apply transformer encoder blocks to each modality
     rgb_x = rgb_encoded_patches
@@ -478,13 +516,13 @@ def build_model(input_shape, num_classes):
         fused_features = transformer_encoder_block(fused_features, NUM_HEADS, EMBED_DIM, EMBED_DIM * 2)
     
     # Global pooling
-    pooled_output = tf.reduce_mean(fused_features, axis=1)  # Global average pooling
+    pooled_output = GlobalAveragePooling1D()(fused_features)
     
     # Reshape back to include sequence dimension [batch_size, sequence_length, EMBED_DIM]
-    pooled_output = tf.reshape(pooled_output, [-1, sequence_length, EMBED_DIM])
+    reshaped_output = Reshape((1, -1))(pooled_output)
     
     # Temporal modeling with LSTM
-    x = LSTM(256, return_sequences=True)(pooled_output)
+    x = LSTM(256, return_sequences=True)(reshaped_output)
     x = LayerNormalization()(x)
     x = LSTM(256)(x)
     x = LayerNormalization()(x)
