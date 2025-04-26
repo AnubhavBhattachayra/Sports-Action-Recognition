@@ -454,7 +454,7 @@ def main():
     print("Two-Stream ACA-Net for Basketball Action Recognition")
     
     # Define dataset path (adjust as needed)
-    DATASET_PATH = r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51'
+    DATASET_PATH = '/kaggle/input/basketball-51/Basketball-51' # Updated path
     
     # Check if dataset exists
     if not os.path.exists(DATASET_PATH):
