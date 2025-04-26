@@ -449,7 +449,7 @@ class FrameSelector(Layer):
         })
         return config
 
-def build_model(input_shape, num_classes):
+def build_model(input_shape, num_classes, class_weights=None):
     """
     Build a dual-stream Vision Transformer (ViT) model with cross-modal fusion 
     for basketball action recognition using RGB and optical flow modalities.
@@ -549,10 +549,33 @@ def build_model(input_shape, num_classes):
     # Create F1 score metric
     f1_metric = F1ScoreMetric(num_classes=num_classes)
     
+    # Create a custom weighted loss function if class weights are provided
+    if class_weights is not None:
+        # Convert class weights dict to tensor with shape matching the number of classes
+        class_weight_tensor = tf.constant([class_weights.get(i, 1.0) for i in range(num_classes)])
+        
+        # Define a weighted categorical crossentropy loss function
+        def weighted_categorical_crossentropy(y_true, y_pred):
+            # Calculate standard categorical crossentropy
+            cce = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+            
+            # Get the class indices
+            class_indices = tf.argmax(y_true, axis=-1)
+            
+            # Get the weights for each sample based on its class
+            weights = tf.gather(class_weight_tensor, class_indices)
+            
+            # Apply the weights to the losses
+            return tf.reduce_mean(cce * weights)
+        
+        loss_fn = weighted_categorical_crossentropy
+    else:
+        loss_fn = 'categorical_crossentropy'
+    
     # Use fixed learning rate instead of cosine decay to ensure model learns
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),  # Fixed learning rate
-        loss='categorical_crossentropy',
+        loss=loss_fn,
         metrics=['accuracy', f1_metric]
     )
     
@@ -680,12 +703,14 @@ def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='model
         validation_steps = max(1, len(test_p) // BATCH_SIZE)
         
         # Compute class weights to handle imbalance
+        from sklearn.utils.class_weight import compute_class_weight
         unique_classes = np.unique(labels)
         class_weights = compute_class_weight(class_weight='balanced', classes=unique_classes, y=labels)
         class_weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
-        print("\nUsing class weights to handle imbalance:")
+        print("\nCalculated class weights to handle imbalance:")
         for class_id, weight in class_weight_dict.items():
             print(f"  - Class {id2label[class_id]}: {weight:.4f}")
+        print("(Will be applied through weighted loss function)")
         
         print_section("DATA PROCESSING")
         print("Using memory-efficient data generator for training data")
@@ -707,7 +732,7 @@ def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='model
         # Build model
         print_section("MODEL ARCHITECTURE")
         input_shape = (SEQ_LENGTH, IMG_SIZE[1], IMG_SIZE[0], 5)  # 3 (RGB) + 2 (flow)
-        model = build_model(input_shape, num_classes)
+        model = build_model(input_shape, num_classes, class_weight_dict)
         model.summary()
         
         # Callbacks with increased patience
@@ -736,14 +761,13 @@ def train_model(epochs=40, test_size=0.2, random_state=42, checkpoint_dir='model
         print(f"Starting training for {epochs} epochs...")
         start_time = time.time()
         
-        # Use fit with generator and class weights
+        # Use fit with generator (without class_weight parameter)
         history = model.fit(
             train_generator,
             steps_per_epoch=steps_per_epoch,
             validation_data=(X_test, y_test),
             epochs=epochs,
-            callbacks=callbacks,
-            class_weight=class_weight_dict  # Use class weights to handle imbalance
+            callbacks=callbacks
         )
         
         training_time = time.time() - start_time
