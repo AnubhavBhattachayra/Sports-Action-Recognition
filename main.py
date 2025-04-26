@@ -565,6 +565,9 @@ def build_model(input_shape, num_classes, class_weights=None):
             # Get the weights for each sample based on its class
             weights = tf.gather(class_weight_tensor, class_indices)
             
+            # Cast weights to float32 to match the type of cce
+            weights = tf.cast(weights, dtype=tf.float32)
+            
             # Apply the weights to the losses
             return tf.reduce_mean(cce * weights)
         
