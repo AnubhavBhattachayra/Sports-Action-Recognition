@@ -14,7 +14,8 @@ import tensorflow as tf
 from tensorflow.keras.layers import (
     Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, 
     GlobalAveragePooling2D, Concatenate, Reshape, Multiply,
-    LayerNormalization, Permute, Attention, Add, TimeDistributed
+    LayerNormalization, Permute, Attention, Add, TimeDistributed,
+    InputSpec
 )
 from tensorflow.keras.models import Model
 from tensorflow.keras.applications import ResNet50
@@ -29,206 +30,207 @@ NUM_CLASSES = 8  # 8 action classes in Basketball-51 (2p0, 2p1, 3p0, 3p1, etc.)
 BATCH_SIZE = 16
 WEIGHT_DECAY = 1e-4
 
+# Helper: Ensure correct input shape for TimeDistributed ResNet
+class CorrectShapeLayer(tf.keras.layers.Layer):
+    def call(self, inputs):
+        # Reshape from (batch, time, h, w, c) to (batch*time, h, w, c)
+        input_shape = tf.shape(inputs)
+        batch_size, seq_len = input_shape[0], input_shape[1]
+        h, w, c = IMG_SIZE[0], IMG_SIZE[1], tf.shape(inputs)[-1] # Use defined IMG_SIZE
+        reshaped_inputs = tf.reshape(inputs, (batch_size * seq_len, h, w, c))
+        return reshaped_inputs
+
+    def compute_output_shape(self, input_shape):
+        # input_shape = (batch, time, h, w, c)
+        h, w, c = IMG_SIZE[0], IMG_SIZE[1], input_shape[-1]
+        return (input_shape[0] * input_shape[1], h, w, c)
+
 def LSTA_module(x, name_prefix="rgb"):
     """
     Long Short-Term Attention (LSTA) module for temporal attention
     
     Args:
-        x: Input tensor, shape (batch, seq_len, height, width, channels)
-        name_prefix: Prefix for naming layers (for two separate streams)
+        x: Input tensor, shape (batch, seq_len, features)
+        name_prefix: Prefix for naming layers
         
     Returns:
-        Tensor with same shape but with temporal attention applied
+        Tensor with temporal attention applied, shape (batch, seq_len, features)
     """
-    # Reshape to handle temporal dimension
-    batch_size, seq_len, h, w, c = tf.keras.backend.int_shape(x)
-    
-    # Reshape to (batch*seq_len, h, w, c) to apply shared CNN operations
-    x_reshaped = Reshape((batch_size * seq_len, h, w, c))(x)
-    
-    # Apply temporal attention
-    # First project to query, key, value spaces
-    q = Conv2D(c // 8, kernel_size=1, name=f"{name_prefix}_lsta_q")(x_reshaped)
-    k = Conv2D(c // 8, kernel_size=1, name=f"{name_prefix}_lsta_k")(x_reshaped)
-    v = Conv2D(c // 2, kernel_size=1, name=f"{name_prefix}_lsta_v")(x_reshaped)
-    
-    # Reshape back to include temporal dimension
-    q = Reshape((batch_size, seq_len, h * w, c // 8))(q)
-    k = Reshape((batch_size, seq_len, h * w, c // 8))(k)
-    v = Reshape((batch_size, seq_len, h * w, c // 2))(v)
-    
-    # Apply attention mechanism
-    attn_output = Attention(name=f"{name_prefix}_lsta_attention")([q, k, v])
-    
-    # Reshape to match original dimensions
-    attn_output = Reshape((batch_size, seq_len, h, w, c // 2))(attn_output)
-    
-    # Project back to original channel dimension
-    proj = Conv2D(c, kernel_size=1, name=f"{name_prefix}_lsta_proj")(
-        Reshape((batch_size * seq_len, h, w, c // 2))(attn_output)
-    )
-    proj = Reshape((batch_size, seq_len, h, w, c))(proj)
-    
-    # Residual connection
-    output = Add(name=f"{name_prefix}_lsta_residual")([x, proj])
-    
+    batch_size, seq_len, features = tf.keras.backend.int_shape(x)
+    if features is None: # Handle dynamic feature dimension after GAP
+        features = tf.shape(x)[-1]
+
+    # Temporal attention: Treat sequence steps as tokens
+    # Use MultiHeadAttention for better performance
+    q = Dense(features, name=f"{name_prefix}_lsta_q_dense")(x)
+    k = Dense(features, name=f"{name_prefix}_lsta_k_dense")(x)
+    v = Dense(features, name=f"{name_prefix}_lsta_v_dense")(x)
+
+    # Add LayerNorm before attention
+    q = LayerNormalization(epsilon=1e-6, name=f"{name_prefix}_lsta_q_norm")(q)
+    k = LayerNormalization(epsilon=1e-6, name=f"{name_prefix}_lsta_k_norm")(k)
+    v = LayerNormalization(epsilon=1e-6, name=f"{name_prefix}_lsta_v_norm")(v)
+
+    # Multi-head attention - assumes features is divisible by num_heads
+    num_heads = 8 # Example, could be tuned
+    head_dim = features // num_heads
+    if head_dim * num_heads != features: # Ensure divisibility
+        # Fallback or adjustment needed if features not divisible
+        # For now, let's assume it is, or adjust Dense output dims
+         print(f"Warning: LSTA features ({features}) not divisible by num_heads ({num_heads}). Adjusting.")
+         # Example adjust: use simpler attention or adjust head_dim
+         attn_output = Attention(name=f"{name_prefix}_lsta_attention")([q, k, v]) # Simplified fallback
+    else:
+        attn_layer = tf.keras.layers.MultiHeadAttention(
+            num_heads=num_heads, key_dim=head_dim, name=f"{name_prefix}_lsta_mha"
+        )
+        attn_output = attn_layer(query=q, key=k, value=v)
+
+    # Projection and residual connection
+    attn_output = Dense(features, name=f"{name_prefix}_lsta_proj_dense")(attn_output)
+    attn_output = Dropout(0.1, name=f"{name_prefix}_lsta_dropout")(attn_output) # Add dropout
+
+    output = Add(name=f"{name_prefix}_lsta_add")([x, attn_output])
+    output = LayerNormalization(epsilon=1e-6, name=f"{name_prefix}_lsta_out_norm")(output)
+
     return output
 
 def TSCI_module(x, name_prefix="rgb"):
     """
-    Temporal-Spatial-Channel Interaction (TSCI) module
+    Temporal-Spatial-Channel Interaction (TSCI) module - Simplified version
+    Applied *after* Global Average Pooling in this structure.
+    Focuses on channel interactions across time.
     
     Args:
-        x: Input tensor, shape (batch, seq_len, height, width, channels)
-        name_prefix: Prefix for naming layers (for two separate streams)
+        x: Input tensor, shape (batch, seq_len, features)
+        name_prefix: Prefix for naming layers
         
     Returns:
-        Enhanced feature maps
+        Enhanced feature maps, shape (batch, seq_len, features)
     """
-    # Get shape
-    batch_size, seq_len, h, w, c = tf.keras.backend.int_shape(x)
-    
-    # Spatial attention
-    # Average pooling across channels
-    spatial_pool = tf.reduce_mean(x, axis=-1, keepdims=True)
-    spatial_attn = Conv2D(1, kernel_size=7, padding='same', activation='sigmoid',
-                         name=f"{name_prefix}_tsci_spatial_attn")(
-        Reshape((batch_size * seq_len, h, w, 1))(spatial_pool)
-    )
-    spatial_attn = Reshape((batch_size, seq_len, h, w, 1))(spatial_attn)
-    
-    # Apply spatial attention
-    x_spatial = Multiply(name=f"{name_prefix}_tsci_spatial_multiply")([x, spatial_attn])
-    
-    # Channel attention
-    # Global average pooling across spatial dimensions
-    channel_pool = GlobalAveragePooling2D()(
-        Reshape((batch_size * seq_len, h, w, c))(x)
-    )
-    channel_pool = Reshape((batch_size, seq_len, c))(channel_pool)
-    
-    # MLP for channel attention
-    channel_attn = Dense(c // 16, activation='relu', name=f"{name_prefix}_tsci_channel_fc1")(
-        Reshape((batch_size * seq_len, c))(channel_pool)
-    )
-    channel_attn = Dense(c, activation='sigmoid', name=f"{name_prefix}_tsci_channel_fc2")(channel_attn)
-    channel_attn = Reshape((batch_size, seq_len, 1, 1, c))(channel_attn)
-    
-    # Apply channel attention
-    x_channel = Multiply(name=f"{name_prefix}_tsci_channel_multiply")([x, channel_attn])
-    
-    # Combine spatial and channel attention
-    output = Add(name=f"{name_prefix}_tsci_combine")([x_spatial, x_channel])
-    
-    return output
+    batch_size, seq_len, features = tf.keras.backend.int_shape(x)
+    if features is None:
+         features = tf.shape(x)[-1]
 
-def ACA_Block(x, filters, name_prefix="rgb"):
-    """
-    Attentive Context Aware (ACA) Block built on top of ResNet block
-    
-    Args:
-        x: Input tensor
-        filters: Number of filters
-        name_prefix: Prefix for naming layers (for two separate streams)
-        
-    Returns:
-        Output tensor
-    """
-    # Apply 1x1 conv to match filter dimensions if needed
-    input_channels = tf.keras.backend.int_shape(x)[-1]
-    if input_channels != filters:
-        shortcut = Conv2D(filters, kernel_size=1, name=f"{name_prefix}_aca_shortcut")(x)
-    else:
-        shortcut = x
-        
-    # Standard ResNet operations
-    x = Conv2D(filters, kernel_size=3, padding='same', activation='relu',
-              kernel_regularizer=l2(WEIGHT_DECAY),
-              name=f"{name_prefix}_aca_conv1")(x)
-    x = LayerNormalization(name=f"{name_prefix}_aca_ln1")(x)
-    x = Conv2D(filters, kernel_size=3, padding='same',
-              kernel_regularizer=l2(WEIGHT_DECAY),
-              name=f"{name_prefix}_aca_conv2")(x)
-    
-    # Add shortcut connection
-    x = Add(name=f"{name_prefix}_aca_add")([x, shortcut])
-    x = tf.keras.activations.relu(x)
-    
-    return x
+    # Channel Attention across sequence
+    # Average over time dimension
+    channel_pool_temporal = tf.reduce_mean(x, axis=1) # Shape: (batch, features)
+
+    # MLP for channel attention weights
+    channel_attn = Dense(features // 16, activation='relu', name=f"{name_prefix}_tsci_channel_fc1")(channel_pool_temporal)
+    channel_attn = Dense(features, activation='sigmoid', name=f"{name_prefix}_tsci_channel_fc2")(channel_attn)
+    channel_attn = Reshape((1, features), name=f"{name_prefix}_tsci_channel_reshape")(channel_attn) # Reshape to (batch, 1, features)
+
+    # Apply channel attention (broadcast over sequence length)
+    x_channel = Multiply(name=f"{name_prefix}_tsci_channel_multiply")([x, channel_attn])
+
+    # Simpler combination for now, focusing on channel enhancement
+    # Residual connection might be better here
+    output = Add(name=f"{name_prefix}_tsci_add")([x, x_channel])
+    output = LayerNormalization(epsilon=1e-6, name=f"{name_prefix}_tsci_out_norm")(output)
+
+    return output
 
 def build_aca_net_stream(input_shape, name_prefix="rgb"):
     """
-    Build a single ACA-Net stream (either RGB or Flow)
+    Build a single ACA-Net stream using ResNet50 backbone.
     
     Args:
         input_shape: Shape of input tensor (seq_len, height, width, channels)
-        name_prefix: Prefix for naming layers (for two separate streams)
+        name_prefix: Prefix for naming layers (e.g., "rgb" or "flow")
         
     Returns:
-        Model representing a single stream of the Two-Stream ACA-Net
+        Model representing a single stream feature extractor.
     """
     seq_len, h, w, c = input_shape
-    
+
     # Input layer
     inputs = Input(shape=input_shape, name=f"{name_prefix}_input")
-    
-    # Modify first conv layer of ResNet50 to handle different input channels
+
+    # Base Model: ResNet50 pre-trained on ImageNet
+    # include_top=False to get features before the final classification layer
+    base_model = ResNet50(include_top=False, weights='imagenet', input_shape=(h, w, 3), pooling=None) # pooling=None initially
+
+    # Handle Flow Input (2 channels) vs RGB (3 channels)
     if name_prefix == "flow" and c == 2:
-        # For optical flow input (2 channels)
-        x = Conv2D(64, kernel_size=7, strides=2, padding='same', activation='relu',
-                  name=f"{name_prefix}_first_conv")(inputs)
-    else:
-        # For RGB input (3 channels) or Flow input (if 3 channels)
-        # Use TimeDistributed to apply the same ResNet across all frames
-        x = TimeDistributed(Conv2D(64, kernel_size=7, strides=2, padding='same', 
-                           activation='relu', name=f"{name_prefix}_first_conv"))(inputs)
-    
-    # Continue with ResNet50 blocks but add ACA-Blocks in between
-    # (simplified version - in a full implementation, we'd modify ResNet50 directly)
-    
-    # Block 1
-    x = TimeDistributed(MaxPooling2D(pool_size=3, strides=2, padding='same'))(x)
-    x = TimeDistributed(ACA_Block(x, 64, name_prefix=f"{name_prefix}_b1"))(x)
-    
-    # Block 2
-    x = TimeDistributed(ACA_Block(x, 128, name_prefix=f"{name_prefix}_b2"))(x)
-    x = TimeDistributed(MaxPooling2D(pool_size=2, strides=2))(x)
-    
-    # Block 3
-    x = TimeDistributed(ACA_Block(x, 256, name_prefix=f"{name_prefix}_b3"))(x)
-    x = TimeDistributed(MaxPooling2D(pool_size=2, strides=2))(x)
-    
-    # Block 4
-    x = TimeDistributed(ACA_Block(x, 512, name_prefix=f"{name_prefix}_b4"))(x)
-    x = TimeDistributed(MaxPooling2D(pool_size=2, strides=2))(x)
-    
-    # Block 5
-    x = TimeDistributed(ACA_Block(x, 1024, name_prefix=f"{name_prefix}_b5"))(x)
-    x = TimeDistributed(ACA_Block(x, 2048, name_prefix=f"{name_prefix}_b6"))(x)
-    
+        # Need to adapt the first layer of ResNet50 for 2 channels
+        # Create a new input layer for the flow stream with the correct shape
+        flow_input_tensor = Input(shape=(h, w, c), name="flow_input_tensor")
+        # Create a new first conv layer matching ResNet's conv1 but with 2 input channels
+        # Keep strides, padding, etc., the same as ResNet50's conv1
+        flow_conv1 = Conv2D(64, kernel_size=7, strides=2, padding='same', name=f"{name_prefix}_conv1_custom")(flow_input_tensor)
+        # Create a model segment for the modified first layer
+        first_layer_model = Model(inputs=flow_input_tensor, outputs=flow_conv1, name=f"{name_prefix}_first_layer")
+
+        # Apply the modified first layer using TimeDistributed
+        x = TimeDistributed(first_layer_model, name=f"{name_prefix}_td_first_layer")(inputs)
+
+        # Freeze original ResNet conv1 weights if loading imagenet weights? No, train from scratch or adapt.
+        # For simplicity here, let's allow this first custom layer to train.
+
+        # Apply the rest of the ResNet layers (skipping the original conv1) using TimeDistributed
+        # Need to carefully connect output of flow_conv1 to input of ResNet's layer after conv1
+        # Get ResNet layers after conv1
+        resnet_layers_after_conv1 = Model(inputs=base_model.get_layer('conv1_relu').output, # Example layer after conv1
+                                           outputs=base_model.output, # Output before global pooling
+                                           name=f"{name_prefix}_resnet_body")
+        x = TimeDistributed(resnet_layers_after_conv1, name=f"{name_prefix}_td_resnet_body")(x)
+
+    else: # RGB Stream (c=3) - Use standard ResNet50
+        # Wrap the standard ResNet50 in TimeDistributed
+        # Important: ResNet50 expects 3 channels. Flow stream might need different handling if c != 3.
+        if c != 3:
+            raise ValueError(f"RGB stream expects 3 channels, but got {c}")
+
+        # Option 1: Modify ResNet50 first layer (as above, but less common for RGB)
+        # Option 2: Use standard ResNet50 (requires input shape (h, w, 3))
+        # We assume standard RGB input for this branch.
+        rgb_base = ResNet50(include_top=False, weights='imagenet', input_shape=(h, w, 3), pooling='avg') # Use avg pooling here
+        # Set layers to non-trainable if using pre-trained weights and not fine-tuning all
+        # for layer in rgb_base.layers[:-4]: # Example: freeze all but last few
+        #     layer.trainable = False
+
+        # Apply TimeDistributed ResNet
+        x = TimeDistributed(rgb_base, name=f"{name_prefix}_td_resnet")(inputs)
+        # Output shape here is (batch, seq_len, 2048) because pooling='avg'
+
+    # If pooling wasn't done in base_model (e.g., for flow), apply it now
+    if name_prefix == "flow": # Assuming flow stream didn't use pooling='avg' in base
+         # Output of resnet_layers_after_conv1 is feature map, need GAP
+         # Reshape needed before applying GAP within TimeDistributed context
+         # Current shape: (batch, seq_len, feat_h, feat_w, feat_c)
+         # Desired input for LSTA/TSCI: (batch, seq_len, features)
+         x = TimeDistributed(GlobalAveragePooling2D(), name=f"{name_prefix}_td_gap")(x)
+         # Output shape: (batch, seq_len, 2048)
+
+    # Feature dimension is now (batch, seq_len, 2048) for both streams
+
     # Apply LSTA module for temporal attention
     x = LSTA_module(x, name_prefix=name_prefix)
-    
-    # Apply TSCI module for spatial-channel interaction
+    # Output shape: (batch, seq_len, 2048)
+
+    # Apply TSCI module for spatial-channel interaction (adapted for temporal features)
     x = TSCI_module(x, name_prefix=name_prefix)
-    
-    # Global average pooling
-    x = TimeDistributed(GlobalAveragePooling2D())(x)
-    
-    # Obtain a 2048-dimensional feature vector (as specified in the document)
-    x = tf.keras.layers.GlobalAveragePooling1D()(x)
-    
-    model = Model(inputs=inputs, outputs=x, name=f"{name_prefix}_stream")
-    
+    # Output shape: (batch, seq_len, 2048)
+
+    # Final Pooling across time dimension to get one vector per sequence
+    # Use GlobalAveragePooling1D across the sequence length
+    final_features = GlobalAveragePooling1D(name=f"{name_prefix}_global_avg_pool_time")(x)
+    # Output shape: (batch, 2048)
+
+    # Create the stream model
+    model = Model(inputs=inputs, outputs=final_features, name=f"{name_prefix}_stream")
+
     return model
 
-def build_two_stream_aca_net(rgb_shape, flow_shape):
+def build_two_stream_aca_net(rgb_shape, flow_shape, num_classes=NUM_CLASSES):
     """
-    Build the complete Two-Stream ACA-Net
+    Build the complete Two-Stream ACA-Net using ResNet50 backbones.
     
     Args:
         rgb_shape: Shape of RGB input (seq_len, height, width, 3)
         flow_shape: Shape of optical flow input (seq_len, height, width, 2)
+        num_classes: Number of output classes
         
     Returns:
         Complete Two-Stream ACA-Net model
@@ -236,31 +238,24 @@ def build_two_stream_aca_net(rgb_shape, flow_shape):
     # Build RGB stream
     rgb_stream = build_aca_net_stream(rgb_shape, name_prefix="rgb")
     rgb_input = rgb_stream.input
-    rgb_features = rgb_stream.output
-    
+    rgb_features = rgb_stream.output # Shape: (batch, 2048)
+
     # Build Flow stream
     flow_stream = build_aca_net_stream(flow_shape, name_prefix="flow")
     flow_input = flow_stream.input
-    flow_features = flow_stream.output
-    
+    flow_features = flow_stream.output # Shape: (batch, 2048)
+
     # Concatenate features from both streams (2048 + 2048 = 4096)
-    concat_features = Concatenate(name="fusion_concat")([rgb_features, flow_features])
-    
+    concat_features = Concatenate(name="fusion_concat")([rgb_features, flow_features]) # Shape: (batch, 4096)
+
     # Fully connected layers for classification as specified in the document
     x = Dense(1024, activation='relu', kernel_regularizer=l2(WEIGHT_DECAY), name="fusion_fc1")(concat_features)
-    x = Dropout(0.5, name="fusion_dropout")(x)
-    outputs = Dense(NUM_CLASSES, activation='softmax', name="prediction")(x)
-    
-    # Create the two-stream model
+    x = Dropout(0.5, name="fusion_dropout")(x) # Added dropout as specified
+    outputs = Dense(num_classes, activation='softmax', name="fusion_output")(x) # Use num_classes
+
+    # Create the final model with two inputs
     model = Model(inputs=[rgb_input, flow_input], outputs=outputs, name="two_stream_aca_net")
-    
-    # Compile with Adam optimizer
-    model.compile(
-        optimizer=Adam(learning_rate=0.0001),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    
+
     return model
 
 def preprocess_rgb_flow_data(video_paths, labels):
@@ -380,7 +375,7 @@ def train_two_stream_aca_net(X_rgb, X_flow, y, epochs=30, validation_split=0.2):
     flow_shape = X_flow.shape[1:] # (seq_len, height, width, 2)
     
     # Build the model
-    model = build_two_stream_aca_net(rgb_shape, flow_shape)
+    model = build_two_stream_aca_net(rgb_shape, flow_shape, NUM_CLASSES)
     
     # Define callbacks
     checkpoint = ModelCheckpoint(
