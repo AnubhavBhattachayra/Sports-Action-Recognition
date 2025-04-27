@@ -18,7 +18,7 @@ from tensorflow.keras.layers import (
     Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, 
     GlobalAveragePooling2D, Concatenate, Reshape, Multiply,
     LayerNormalization, Permute, Attention, Add, TimeDistributed,
-    InputSpec
+    InputSpec, GlobalAveragePooling1D
 )
 from tensorflow.keras.models import Model
 from tensorflow.keras.applications import ResNet50
