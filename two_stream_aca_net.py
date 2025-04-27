@@ -505,9 +505,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
         epochs=epochs,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
-        callbacks=[checkpoint, early_stopping, reduce_lr],
-        workers=max(1, cpu_count() // 2), # Use multiple workers for generator
-        use_multiprocessing=True
+        callbacks=[checkpoint, early_stopping, reduce_lr]
     )
 
     # Load best weights if not restored by EarlyStopping
@@ -532,9 +530,8 @@ def evaluate_model(model, test_paths, test_labels, flow_dir, dataset_base_path):
     # Use tqdm for progress bar
     y_pred_prob = model.predict(test_generator,
                               steps=len(test_generator),
-                              workers=max(1, cpu_count() // 2),
-                              use_multiprocessing=True,
-                              verbose=1)
+                              verbose=1
+                              )
 
     # Ensure we only evaluate on the actual number of test samples
     num_test_samples = len(test_paths)
