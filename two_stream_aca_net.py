@@ -128,7 +128,7 @@ def TSCI_module(x, name_prefix="rgb"):
 
     # Channel Attention across sequence
     # Average over time dimension
-    channel_pool_temporal = tf.reduce_mean(x, axis=1) # Shape: (batch, features)
+    channel_pool_temporal = tf.keras.layers.GlobalAveragePooling1D(name=f"{name_prefix}_tsci_temporal_avg")(x) # Use Keras layer
 
     # MLP for channel attention weights
     # Ensure features is statically known or handle dynamically
