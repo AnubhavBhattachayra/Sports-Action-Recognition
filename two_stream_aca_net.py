@@ -466,7 +466,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     model.summary()
 
     # Define callbacks (Ensure F1 score monitoring if used)
-    checkpoint_path = "two_stream_aca_net_best.h5" # Changed name
+    checkpoint_path = "two_stream_aca_net_best.keras" # Use .keras extension
     checkpoint = ModelCheckpoint(
         checkpoint_path,
         monitor='val_accuracy', # Or val_f1_score if metric is added
@@ -661,7 +661,7 @@ def main(args):
     print(metrics['confusion_matrix'])
 
     # Save the final (best) model - already saved by ModelCheckpoint
-    print(f"\nBest model saved during training to: two_stream_aca_net_best.h5")
+    print(f"\nBest model saved during training to: {checkpoint_path}")
 
     # Optional: Plot training history
     # Implement plot_history function if needed
