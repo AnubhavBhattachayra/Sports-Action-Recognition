@@ -437,16 +437,16 @@ class DataGenerator(Sequence):
              rgb_shape = (0, self.seq_length, self.img_h, self.img_w, 3)
              flow_shape = (0, self.seq_length, self.img_h, self.img_w, 2)
              label_shape = (0, self.num_classes)
-             return [np.zeros(rgb_shape, dtype=np.float32), np.zeros(flow_shape, dtype=np.float32)], np.zeros(label_shape, dtype=np.float32)
+             return ((np.zeros(rgb_shape, dtype=np.float32), np.zeros(flow_shape, dtype=np.float32)), np.zeros(label_shape, dtype=np.float32))
 
         # Convert lists of valid samples to NumPy arrays
         batch_X_rgb = np.array(valid_X_rgb, dtype=np.float32)
         batch_X_flow = np.array(valid_X_flow, dtype=np.float32)
         batch_y = np.array(valid_y, dtype=np.float32)
 
-        # Return a tuple: (features, labels)
-        # Features itself is a list [rgb, flow]
-        return ([batch_X_rgb, batch_X_flow], batch_y)
+        # Return a tuple: ((features_tuple), labels)
+        # Features itself is now a tuple (rgb, flow)
+        return ((batch_X_rgb, batch_X_flow), batch_y)
 
     def on_epoch_end(self):
         """Shuffle indices after each epoch."""
@@ -458,7 +458,8 @@ class DataGenerator(Sequence):
         rgb_spec = tf.TensorSpec(shape=(None, self.seq_length, self.img_h, self.img_w, 3), dtype=tf.float32)
         flow_spec = tf.TensorSpec(shape=(None, self.seq_length, self.img_h, self.img_w, 2), dtype=tf.float32)
         label_spec = tf.TensorSpec(shape=(None, self.num_classes), dtype=tf.float32)
-        return ([rgb_spec, flow_spec], label_spec)
+        # Return as tuple: ((feature_specs), label_spec)
+        return ((rgb_spec, flow_spec), label_spec)
 
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                              flow_dir, dataset_base_path, epochs=30):
