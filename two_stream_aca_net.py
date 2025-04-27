@@ -444,7 +444,9 @@ class DataGenerator(Sequence):
         batch_X_flow = np.array(valid_X_flow, dtype=np.float32)
         batch_y = np.array(valid_y, dtype=np.float32)
 
-        return [batch_X_rgb, batch_X_flow], batch_y
+        # Return a tuple: (features, labels)
+        # Features itself is a list [rgb, flow]
+        return ([batch_X_rgb, batch_X_flow], batch_y)
 
     def on_epoch_end(self):
         """Shuffle indices after each epoch."""
