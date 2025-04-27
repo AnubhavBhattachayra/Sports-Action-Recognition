@@ -37,7 +37,8 @@ IMG_SIZE_CV = (160, 120) # width, height for cv2.resize
 NUM_CLASSES = 8
 BATCH_SIZE = 16
 WEIGHT_DECAY = 1e-4
-FLOW_DIR = './flow_data' # Default path for precomputed flow
+# FLOW_DIR = './flow_data' # Old default path for precomputed flow
+FLOW_DIR = '/kaggle/input/flow-data-50-basketball-51/flow_data' # New Kaggle dataset default path
 
 # Helper: Ensure correct input shape for TimeDistributed ResNet
 class CorrectShapeLayer(tf.keras.layers.Layer):
@@ -669,7 +670,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Two-Stream ACA-Net on Basketball-51.")
     parser.add_argument('--dataset_path', type=str, default='/kaggle/input/basketball-51/Basketball-51',
                         help='Path to the root directory of the Basketball-51 video dataset.')
-    parser.add_argument('--flow_path', type=str, default=FLOW_DIR,
+    parser.add_argument('--flow_path', type=str, default=FLOW_DIR, # Use the updated FLOW_DIR constant
                         help='Path to the directory containing precomputed flow .npy files.')
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of training epochs.')
