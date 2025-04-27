@@ -439,7 +439,7 @@ class DataGenerator(Sequence):
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                              flow_dir, dataset_base_path, epochs=30):
     """
-    Train the Two-Stream ACA-Net using data generators.
+    Train the Two-Stream ACA-Net using data generators wrapped in tf.data.Dataset.
     """
     print(f"Training with {len(train_paths)} samples, validating with {len(val_paths)} samples.")
 
@@ -457,7 +457,20 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
         augment=False # No augmentation for validation
     )
 
-    # Define model input shapes
+    # --- Wrap generators in tf.data.Dataset --- 
+    # Use the element_spec defined in the generator
+    train_ds = tf.data.Dataset.from_generator(
+        lambda: train_generator, # Use a lambda to pass the generator instance
+        output_signature=train_generator.element_spec
+    ).prefetch(tf.data.AUTOTUNE)
+
+    val_ds = tf.data.Dataset.from_generator(
+        lambda: val_generator,
+        output_signature=val_generator.element_spec
+    ).prefetch(tf.data.AUTOTUNE)
+    # --- End wrapping --- 
+    
+    # Define model input shapes (still needed for building the model)
     rgb_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 3)
     flow_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 2)
 
@@ -472,7 +485,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
 
     model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
     print("Model Compiled.")
-    model.summary()
+    # model.summary() # Can be very verbose, optional
 
     # Define callbacks (Ensure F1 score monitoring if used)
     checkpoint_path = "two_stream_aca_net_best.keras" # Use .keras extension
@@ -500,19 +513,34 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     )
 
     # Calculate steps per epoch
+    # Note: __len__ already calculates floor(num_samples / batch_size)
     steps_per_epoch = len(train_generator)
     validation_steps = len(val_generator)
+
+    # Check if generators are empty
+    if steps_per_epoch == 0:
+        print("Error: Training generator has zero length. Check dataset paths and flow files.", file=sys.stderr)
+        return None, None # Cannot train
+    if validation_steps == 0:
+         print("Warning: Validation generator has zero length. Validation metrics will not be computed.", file=sys.stderr)
+         # Option: Set validation_steps to None to disable validation in model.fit
+         val_ds = None # Pass None for validation_data if generator is empty
+         validation_steps = None
+         # Or return error: 
+         # print("Error: Validation generator empty.", file=sys.stderr)
+         # return None, None
+
 
     print(f"Steps per epoch: {steps_per_epoch}")
     print(f"Validation steps: {validation_steps}")
 
-    # Train the model using the generator
+    # Train the model using the tf.data.Dataset objects
     history = model.fit(
-        train_generator,
-        validation_data=val_generator,
+        train_ds, # Pass the dataset
+        validation_data=val_ds, # Pass the dataset (or None)
         epochs=epochs,
-        steps_per_epoch=steps_per_epoch,
-        validation_steps=validation_steps,
+        steps_per_epoch=steps_per_epoch, # Still needed if dataset is not infinite
+        validation_steps=validation_steps, # Still needed if dataset is not infinite
         callbacks=[checkpoint, early_stopping, reduce_lr]
     )
 
@@ -523,7 +551,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
 
 def evaluate_model(model, test_paths, test_labels, flow_dir, dataset_base_path):
     """
-    Evaluate the trained model using a data generator for the test set.
+    Evaluate the trained model using a data generator wrapped in tf.data.Dataset.
     """
     print(f"Evaluating on {len(test_paths)} test samples...")
 
@@ -534,37 +562,99 @@ def evaluate_model(model, test_paths, test_labels, flow_dir, dataset_base_path):
         augment=False # No augmentation for testing
     )
 
-    # Predict using the generator
-    # Use tqdm for progress bar
-    y_pred_prob = model.predict(test_generator,
-                              steps=len(test_generator),
+    # Check if test generator is empty
+    if len(test_generator) == 0:
+        print("Error: Test generator has zero length. Cannot evaluate.", file=sys.stderr)
+        return { # Return default empty metrics
+            'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0,
+            'f1_score': 0.0, 'confusion_matrix': np.zeros((NUM_CLASSES, NUM_CLASSES)), 'auc': 'N/A'
+        }
+        
+    # --- Wrap generator in tf.data.Dataset ---
+    test_ds = tf.data.Dataset.from_generator(
+        lambda: test_generator,
+        output_signature=test_generator.element_spec
+    ).prefetch(tf.data.AUTOTUNE)
+    # --- End wrapping ---
+
+    # Predict using the dataset
+    print("Predicting on test dataset...")
+    # When predicting on tf.data.Dataset, steps is usually not needed unless dataset is infinite
+    y_pred_prob = model.predict(test_ds,
+                              # steps=len(test_generator), # Remove steps for finite dataset
                               verbose=1
                               )
 
-    # Ensure we only evaluate on the actual number of test samples
-    num_test_samples = len(test_paths)
-    y_pred_prob = y_pred_prob[:num_test_samples]
-    y_pred = np.argmax(y_pred_prob, axis=1)
+    # --- IMPORTANT: Post-prediction handling ---
+    # When using tf.data.Dataset, predict returns predictions for all samples processed.
+    # The number of predictions should ideally match the number of valid samples.
+    num_predictions = len(y_pred_prob)
+    print(f"Received {num_predictions} predictions.")
 
-    # Prepare true labels (convert from integers if needed)
-    y_true = np.array(test_labels)
+    # We need the ground truth labels for the samples that were *actually* processed.
+    # Reconstruct the valid labels by iterating through the test paths again.
+    actual_test_labels = []
+    # Ensure we iterate in the same order as the generator (assuming no shuffle for test)
+    test_indices = test_generator.indices # Get the potentially unshuffled indices
+    for k in test_indices:
+        # Check if the flow file for this index actually exists
+        video_path = test_generator.video_paths[k]
+        relative_path = os.path.relpath(video_path, test_generator.dataset_base_path)
+        base_filename = os.path.splitext(os.path.basename(relative_path))[0]
+        flow_filename = os.path.join(test_generator.flow_dir, os.path.dirname(relative_path), f"{base_filename}_flow.npy")
+        if os.path.exists(flow_filename):
+             # Also ensure RGB is readable
+             rgb_check = extract_rgb_frames(video_path, test_generator.seq_length, test_generator.img_size_cv)
+             if rgb_check is not None:
+                 actual_test_labels.append(test_generator.labels[k])
+
+    num_actual_labels = len(actual_test_labels)
+    print(f"Constructed {num_actual_labels} ground truth labels for evaluation.")
+
+    # Check if the number of predictions matches the reconstructed labels
+    if num_predictions != num_actual_labels:
+        print(f"Warning: Number of predictions ({num_predictions}) does not match number of reconstructed valid labels ({num_actual_labels}). Evaluation might be inaccurate.", file=sys.stderr)
+        # Decide how to handle: Trim predictions? Error out? For now, trim.
+        min_len = min(num_predictions, num_actual_labels)
+        if min_len == 0:
+             print("Error: No valid samples/predictions to evaluate.", file=sys.stderr)
+             return { # Return default empty metrics
+                'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0,
+                'f1_score': 0.0, 'confusion_matrix': np.zeros((NUM_CLASSES, NUM_CLASSES)), 'auc': 'N/A'
+            }
+        y_pred_prob = y_pred_prob[:min_len]
+        actual_test_labels = actual_test_labels[:min_len]
+        y_true = np.array(actual_test_labels)
+        print(f"Evaluating on {min_len} matched samples.")
+    elif num_actual_labels == 0:
+        print("Warning: No valid samples found for evaluation based on file checks.", file=sys.stderr)
+        return { # Return default empty metrics
+            'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0,
+            'f1_score': 0.0, 'confusion_matrix': np.zeros((NUM_CLASSES, NUM_CLASSES)), 'auc': 'N/A'
+        }
+    else:
+        y_true = np.array(actual_test_labels)
+
+    # Proceed with evaluation using y_pred_prob and y_true
+    y_pred = np.argmax(y_pred_prob, axis=1)
     y_true_cat = to_categorical(y_true, num_classes=NUM_CLASSES)
 
     # Calculate metrics
+    print(f"Calculating metrics on {len(y_true)} true labels vs {len(y_pred)} predictions.")
     metrics = {
         'accuracy': accuracy_score(y_true, y_pred),
         'precision': precision_score(y_true, y_pred, average='weighted', zero_division=0),
         'recall': recall_score(y_true, y_pred, average='weighted', zero_division=0),
         'f1_score': f1_score(y_true, y_pred, average='weighted', zero_division=0),
-        'confusion_matrix': confusion_matrix(y_true, y_pred)
+        'confusion_matrix': confusion_matrix(y_true, y_pred, labels=list(range(NUM_CLASSES))) # Ensure all labels included
     }
 
     # Try to calculate AUC
     try:
         # Use one-hot encoded true labels for AUC
-        metrics['auc'] = roc_auc_score(y_true_cat, y_pred_prob, multi_class='ovr')
+        metrics['auc'] = roc_auc_score(y_true_cat, y_pred_prob, multi_class='ovr', average='weighted')
     except Exception as e:
-        print(f"Could not calculate AUC: {e}")
+        print(f"Could not calculate AUC: {e}", file=sys.stderr)
         metrics['auc'] = 'N/A'
 
     return metrics
