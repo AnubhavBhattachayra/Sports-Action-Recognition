@@ -428,6 +428,14 @@ class DataGenerator(Sequence):
         """Shuffle indices after each epoch."""
         np.random.shuffle(self.indices)
 
+    @property # Use property for compatibility with tf.data.Dataset.from_generator
+    def element_spec(self):
+        rgb_spec = tf.TensorSpec(shape=(None, self.seq_length, self.img_h, self.img_w, 3), dtype=tf.float32)
+        flow_spec = tf.TensorSpec(shape=(None, self.seq_length, self.img_h, self.img_w, 2), dtype=tf.float32)
+        label_spec = tf.TensorSpec(shape=(None, self.num_classes), dtype=tf.float32)
+        # Note: Using None for batch dimension allows handling the last batch if it's smaller
+        return ([rgb_spec, flow_spec], label_spec)
+
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                              flow_dir, dataset_base_path, epochs=30):
     """
