@@ -14,6 +14,7 @@ import tensorflow as tf
 import cv2 # Keep for frame extraction
 import random # For augmentations
 import argparse # <-- ADDED IMPORT
+from multiprocessing import cpu_count # <-- ADDED IMPORT
 from tensorflow.keras.layers import (
     Input, Conv2D, MaxPooling2D, Dense, Dropout, Flatten, 
     GlobalAveragePooling2D, Concatenate, Reshape, Multiply,
