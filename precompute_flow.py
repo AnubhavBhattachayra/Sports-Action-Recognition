@@ -128,6 +128,7 @@ def get_video_paths(dataset_path):
             if file.lower().endswith('.mp4'):
                 video_paths.append(os.path.join(root, file))
     print(f"Found {len(video_paths)} video files.")
+    video_paths.sort() # <-- ADDED: Sort the paths for consistency
     return video_paths
 
 # --- Main Execution ---
@@ -148,8 +149,10 @@ def main():
     video_paths = get_video_paths(args.dataset_path)
     if not video_paths:
         return # Exit if no videos found
+    
+    video_paths.sort() # <-- ADDED: Sort the paths for consistency
 
-    # --- Added: Select 50% of the videos ---
+    # --- Select 50% of the videos (Consistent Selection) ---
     SEED = 42 # Define a fixed seed
     random.seed(SEED) # Set the random seed
     num_videos_to_use = int(len(video_paths) * 0.50)

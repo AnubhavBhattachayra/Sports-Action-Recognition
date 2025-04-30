@@ -39,7 +39,8 @@ NUM_CLASSES = 8
 BATCH_SIZE = 16
 WEIGHT_DECAY = 1e-4
 # FLOW_DIR = './flow_data' # Old default path for precomputed flow
-FLOW_DIR = '/kaggle/input/flow-data-50-basketball-51/flow_data' # New Kaggle dataset default path
+FLOW_DIR = '/kaggle/input/flow-data-50-basketball-51/flow_data' # Default Kaggle dataset path for FLOW
+RGB_DIR = '/kaggle/input/rgb-data-50-basketball-51/rgb_data' # Default Kaggle dataset path for RGB
 
 # Helper: Ensure correct input shape for TimeDistributed ResNet
 class CorrectShapeLayer(tf.keras.layers.Layer):
@@ -255,40 +256,6 @@ def build_two_stream_aca_net(rgb_shape, flow_shape, num_classes=NUM_CLASSES):
     
     return model
 
-def extract_rgb_frames(video_path, seq_length, img_size_cv):
-    """Extracts, resizes, samples/pads RGB frames ONLY."""
-    frames = []
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error: Could not open video {video_path}", file=sys.stderr)
-        # Return black frames as fallback
-        return np.zeros((seq_length, img_size_cv[1], img_size_cv[0], 3), dtype=np.float32)
-
-    all_frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = cv2.resize(frame, img_size_cv)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        all_frames.append(frame)
-    cap.release()
-            
-    if not all_frames:
-        print(f"Warning: No frames extracted from {video_path}", file=sys.stderr)
-        return np.zeros((seq_length, img_size_cv[1], img_size_cv[0], 3), dtype=np.float32)
-
-    # Sample or pad frames
-    if len(all_frames) >= seq_length:
-        idxs = np.linspace(0, len(all_frames) - 1, seq_length).astype(int)
-        frames = [all_frames[i] for i in idxs]
-    else:
-        frames = all_frames + [all_frames[-1]] * (seq_length - len(all_frames))
-
-    # Normalize RGB frames to [0, 1]
-    rgb_sequence = np.array(frames, dtype=np.float32) / 255.0
-    return rgb_sequence
-
 def normalize_flow(flow_sequence):
     """Normalize flow vectors. Flow values can vary widely.
        Simple approach: Clip and scale to [0, 1].
@@ -339,9 +306,10 @@ def augment_data(rgb_seq, flow_seq, img_h, img_w, augment=True):
     return rgb_seq, flow_seq
 
 class DataGenerator(Sequence):
-    """Generates batches of RGB and pre-computed Flow data."""
+    """Generates batches of pre-computed RGB and Flow data."""
     def __init__(self, video_paths, labels, batch_size, num_classes,
-                 seq_length, img_size, img_size_cv, flow_dir,
+                 seq_length, img_size, # img_size_cv no longer needed here
+                 flow_dir, rgb_dir, # Add rgb_dir
                  dataset_base_path, augment=False):
         self.video_paths = video_paths
         self.labels = labels
@@ -349,19 +317,22 @@ class DataGenerator(Sequence):
         self.num_classes = num_classes
         self.seq_length = seq_length
         self.img_h, self.img_w = img_size # Keras format (h, w)
-        self.img_size_cv = img_size_cv # OpenCV format (w, h)
+        # self.img_size_cv = img_size_cv # No longer needed
         self.flow_dir = flow_dir
+        self.rgb_dir = rgb_dir # Store rgb_dir path
         self.dataset_base_path = dataset_base_path
         self.augment = augment
         self.indices = np.arange(len(self.video_paths))
-        self.on_epoch_end() # Shuffle indices initially
+        # Ensure shuffling happens if it's the training generator
+        if self.augment:
+            self.on_epoch_end() # Shuffle indices initially for training
 
     def __len__(self):
         """Number of batches per epoch."""
         return int(np.floor(len(self.video_paths) / self.batch_size))
 
     def __getitem__(self, index):
-        """Generate one batch of data, skipping samples with missing flow."""
+        """Generate one batch of data, skipping samples with missing flow or rgb."""
         # Generate indices of the batch
         batch_indices = self.indices[index*self.batch_size:(index+1)*self.batch_size]
 
@@ -377,56 +348,43 @@ class DataGenerator(Sequence):
         # Generate data for each item in the batch
         for video_path, label in zip(batch_video_paths, batch_labels):
             try: # Start try block for this single video
-                # 1. Construct the expected flow file path
+                # 1. Construct the expected file paths for RGB and Flow
                 relative_path = os.path.relpath(video_path, self.dataset_base_path)
                 base_filename = os.path.splitext(os.path.basename(relative_path))[0]
-                flow_filename = os.path.join(self.flow_dir,
-                                             os.path.dirname(relative_path),
-                                             f"{base_filename}_flow.npy")
+                sub_dir = os.path.dirname(relative_path)
 
-                # 2. Check if the flow file exists BEFORE extracting RGB
-                if not os.path.exists(flow_filename):
-                    # Flow file doesn't exist, skip this sample
+                flow_filename = os.path.join(self.flow_dir, sub_dir, f"{base_filename}_flow.npy")
+                rgb_filename = os.path.join(self.rgb_dir, sub_dir, f"{base_filename}_rgb.npy")
+
+                # 2. Check if BOTH files exist BEFORE loading
+                if not os.path.exists(flow_filename) or not os.path.exists(rgb_filename):
+                    # Skip if either RGB or Flow file is missing
                     continue # Move to the next video_path in the loop
 
-                # 3. If flow exists, try extracting RGB frames
-                rgb_sequence = extract_rgb_frames(video_path, self.seq_length, self.img_size_cv)
-
-                # Check if RGB extraction was successful
-                if rgb_sequence is None:
-                    # RGB extraction failed, skip this sample
-                    print(f"Warning: Skipping sample due to RGB extraction failure: {video_path}", file=sys.stderr)
-                    continue # Move to the next video_path
-
-                # --- If both flow exists and RGB extracted ---
-                # 4. Load pre-computed flow
+                # --- If both files exist --- 
+                # 3. Load pre-computed RGB and Flow
+                rgb_sequence = np.load(rgb_filename)
                 flow_sequence = np.load(flow_filename)
 
-                # Ensure flow shape matches expected (resize if needed)
-                if flow_sequence.shape[1:3] != (self.img_h, self.img_w):
-                     flow_sequence_resized = np.zeros((self.seq_length, self.img_h, self.img_w, 2), dtype=np.float32)
-                     for frame_idx in range(self.seq_length):
-                          flow_sequence_resized[frame_idx] = cv2.resize(flow_sequence[frame_idx],
-                                                                       (self.img_w, self.img_h), # Use Keras size (w, h) for cv2 here
-                                                                       interpolation=cv2.INTER_LINEAR)
-                     flow_sequence = flow_sequence_resized
+                # Optional: Verify shapes after loading (can add checks if needed)
+                # if rgb_sequence.shape != (self.seq_length, self.img_h, self.img_w, 3): ...
+                # if flow_sequence.shape != (self.seq_length, self.img_h, self.img_w, 2): ...
 
-                # 5. Normalize Flow
+                # 4. Normalize Flow (RGB is assumed pre-normalized)
                 flow_sequence = normalize_flow(flow_sequence)
 
-                # 6. Data Augmentation (synchronized)
+                # 5. Data Augmentation (synchronized)
                 rgb_sequence, flow_sequence = augment_data(rgb_sequence, flow_sequence,
                                                          self.img_h, self.img_w,
                                                          self.augment)
 
-                # 7. Append valid sample to lists
+                # 6. Append valid sample to lists
                 valid_X_rgb.append(rgb_sequence)
                 valid_X_flow.append(flow_sequence)
                 valid_y.append(to_categorical(label, num_classes=self.num_classes))
 
-            except Exception as e: # Correctly indented except block for the loop item
-                # Catch any other unexpected errors during processing for this sample
-                print(f"Error processing sample {video_path}: {e}", file=sys.stderr)
+            except Exception as e: # Catch loading or processing errors
+                print(f"Error processing precomputed data for {video_path}: {e}", file=sys.stderr)
                 # Skip this sample by continuing the loop
                 continue
 
@@ -437,6 +395,7 @@ class DataGenerator(Sequence):
              rgb_shape = (0, self.seq_length, self.img_h, self.img_w, 3)
              flow_shape = (0, self.seq_length, self.img_h, self.img_w, 2)
              label_shape = (0, self.num_classes)
+             # Return tuple matching element_spec
              return ((np.zeros(rgb_shape, dtype=np.float32), np.zeros(flow_shape, dtype=np.float32)), np.zeros(label_shape, dtype=np.float32))
 
         # Convert lists of valid samples to NumPy arrays
@@ -445,7 +404,6 @@ class DataGenerator(Sequence):
         batch_y = np.array(valid_y, dtype=np.float32)
 
         # Return a tuple: ((features_tuple), labels)
-        # Features itself is now a tuple (rgb, flow)
         return ((batch_X_rgb, batch_X_flow), batch_y)
 
     def on_epoch_end(self):
@@ -462,23 +420,26 @@ class DataGenerator(Sequence):
         return ((rgb_spec, flow_spec), label_spec)
 
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
-                             flow_dir, dataset_base_path, epochs=30):
+                             flow_dir, rgb_dir, # Add rgb_dir
+                             dataset_base_path, epochs=30):
     """
-    Train the Two-Stream ACA-Net using data generators.
+    Train the Two-Stream ACA-Net using data generators loading precomputed data.
     """
     print(f"Training with {len(train_paths)} samples, validating with {len(val_paths)} samples.")
 
-    # Create data generators
+    # Create data generators, passing rgb_dir
     train_generator = DataGenerator(
         video_paths=train_paths, labels=train_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
-        img_size_cv=IMG_SIZE_CV, flow_dir=flow_dir, dataset_base_path=dataset_base_path,
+        flow_dir=flow_dir, rgb_dir=rgb_dir, # Pass rgb_dir
+        dataset_base_path=dataset_base_path,
         augment=True # Enable augmentation for training
     )
     val_generator = DataGenerator(
         video_paths=val_paths, labels=val_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
-        img_size_cv=IMG_SIZE_CV, flow_dir=flow_dir, dataset_base_path=dataset_base_path,
+        flow_dir=flow_dir, rgb_dir=rgb_dir, # Pass rgb_dir
+        dataset_base_path=dataset_base_path,
         augment=False # No augmentation for validation
     )
     
@@ -546,16 +507,20 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     
     return model, history
 
-def evaluate_model(model, test_paths, test_labels, flow_dir, dataset_base_path):
+def evaluate_model(model, test_paths, test_labels,
+                   flow_dir, rgb_dir, # Add rgb_dir
+                   dataset_base_path):
     """
-    Evaluate the trained model using a data generator for the test set.
+    Evaluate the trained model using a data generator loading precomputed data.
     """
     print(f"Evaluating on {len(test_paths)} test samples...")
 
+    # Create test generator, passing rgb_dir
     test_generator = DataGenerator(
-        video_paths=test_paths, labels=test_labels, batch_size=BATCH_SIZE, # Use same batch size
+        video_paths=test_paths, labels=test_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
-        img_size_cv=IMG_SIZE_CV, flow_dir=flow_dir, dataset_base_path=dataset_base_path,
+        flow_dir=flow_dir, rgb_dir=rgb_dir, # Pass rgb_dir
+        dataset_base_path=dataset_base_path,
         augment=False # No augmentation for testing
     )
 
@@ -620,19 +585,24 @@ def get_video_paths_and_labels(dataset_path):
     return video_paths, labels, label2id
 
 def main(args):
-    """Main function modified to use generators and precomputed flow."""
+    """Main function modified to use generators and precomputed RGB/flow."""
     print("Two-Stream ACA-Net Training Pipeline")
     print(f"Dataset Path: {args.dataset_path}")
+    print(f"RGB Data Path: {args.rgb_path}") # Use new arg
     print(f"Flow Data Path: {args.flow_path}")
     print(f"Epochs: {args.epochs}")
 
-    # Check if dataset and flow directories exist
+    # Check if dataset, RGB, and flow directories exist
     if not os.path.isdir(args.dataset_path):
         print(f"Error: Dataset directory not found at: {args.dataset_path}", file=sys.stderr)
         return
+    if not os.path.isdir(args.rgb_path):
+        print(f"Error: RGB data directory not found at: {args.rgb_path}", file=sys.stderr)
+        print("Please run precompute_rgb.py first and ensure path is correct.")
+        return
     if not os.path.isdir(args.flow_path):
         print(f"Error: Flow data directory not found at: {args.flow_path}", file=sys.stderr)
-        print("Please run precompute_flow.py first.")
+        print("Please run precompute_flow.py first and ensure path is correct.")
         return
     
     # Get video paths and integer labels
@@ -668,17 +638,19 @@ def main(args):
     )
     print(f"Train samples: {len(train_paths)}, Validation samples: {len(val_paths)}, Test samples: {len(test_paths)}")
 
-    # Train model using generators
+    # Train model using generators, passing rgb_path
     print("Starting model training...")
     model, history = train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                                           flow_dir=args.flow_path,
+                                          rgb_dir=args.rgb_path, # Pass rgb_path
                                           dataset_base_path=args.dataset_path,
                                           epochs=args.epochs)
 
-    # Evaluate model using generator
+    # Evaluate model using generator, passing rgb_path
     print("Starting model evaluation on test set...")
     metrics = evaluate_model(model, test_paths, test_labels,
                              flow_dir=args.flow_path,
+                             rgb_dir=args.rgb_path, # Pass rgb_path
                              dataset_base_path=args.dataset_path)
     
     # Print results
@@ -701,11 +673,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Two-Stream ACA-Net on Basketball-51.")
     parser.add_argument('--dataset_path', type=str, default='/kaggle/input/basketball-51/Basketball-51',
                         help='Path to the root directory of the Basketball-51 video dataset.')
-    parser.add_argument('--flow_path', type=str, default=FLOW_DIR, # Use the updated FLOW_DIR constant
+    # Add argument for RGB data path
+    parser.add_argument('--rgb_path', type=str, default=RGB_DIR, # Use RGB_DIR constant
+                        help='Path to the directory containing precomputed RGB .npy files.')
+    parser.add_argument('--flow_path', type=str, default=FLOW_DIR,
                         help='Path to the directory containing precomputed flow .npy files.')
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of training epochs.')
-    # Add other arguments if needed (e.g., batch size, learning rate)
 
     args = parser.parse_args()
     main(args) 
