@@ -38,9 +38,8 @@ IMG_SIZE_CV = (160, 120) # width, height for cv2.resize
 NUM_CLASSES = 8
 BATCH_SIZE = 16
 WEIGHT_DECAY = 1e-4
-# FLOW_DIR = './flow_data' # Old default path for precomputed flow
-FLOW_DIR = '/kaggle/input/flow-data-50-basketball-51/flow_data' # Default Kaggle dataset path for FLOW
-RGB_DIR = '/kaggle/input/rgb-data-50-basketball-51/rgb_data' # Default Kaggle dataset path for RGB
+FLOW_DIR = '/kaggle/input/flow-data-50-basketball-51/flow_data' # Default Flow path
+RGB_DIR = './rgb_data' # Default path for precomputed RGB
 
 # Helper: Ensure correct input shape for TimeDistributed ResNet
 class CorrectShapeLayer(tf.keras.layers.Layer):
@@ -101,7 +100,7 @@ def LSTA_module(x, name_prefix="rgb"):
             num_heads=num_heads, key_dim=head_dim, name=f"{name_prefix}_lsta_mha"
         )
         attn_output = attn_layer(query=q, key=k, value=v)
-
+    
     # Projection and residual connection
     attn_output = Dense(features, name=f"{name_prefix}_lsta_proj_dense")(attn_output)
     attn_output = Dropout(0.1, name=f"{name_prefix}_lsta_dropout")(attn_output) # Add dropout
@@ -145,7 +144,7 @@ def TSCI_module(x, name_prefix="rgb"):
     channel_attn = Dense(intermediate_dim, activation='relu', name=f"{name_prefix}_tsci_channel_fc1")(channel_pool_temporal)
     channel_attn = Dense(features, activation='sigmoid', name=f"{name_prefix}_tsci_channel_fc2")(channel_attn)
     channel_attn = Reshape((1, features), name=f"{name_prefix}_tsci_channel_reshape")(channel_attn) # Reshape to (batch, 1, features)
-
+    
     # Apply channel attention (broadcast over sequence length)
     x_channel = Multiply(name=f"{name_prefix}_tsci_channel_multiply")([x, channel_attn])
     
@@ -184,7 +183,7 @@ def build_aca_net_stream(input_shape, name_prefix="rgb"):
         flow_conv1 = Conv2D(64, kernel_size=7, strides=2, padding='same', name=f"{name_prefix}_conv1_custom")(flow_input_tensor)
         first_layer_model = Model(inputs=flow_input_tensor, outputs=flow_conv1, name=f"{name_prefix}_first_layer")
         x = TimeDistributed(first_layer_model, name=f"{name_prefix}_td_first_layer")(inputs)
-
+    
         # Apply the rest of the ResNet layers (skipping the original conv1)
         # Find the layer after conv1 + bn + relu
         relu_layer_name = 'conv1_relu' # Standard ResNet50 layer name
@@ -213,7 +212,7 @@ def build_aca_net_stream(input_shape, name_prefix="rgb"):
     # If pooling wasn't done in base_model (e.g., for flow), apply it now
     if name_prefix == "flow":
          x = TimeDistributed(GlobalAveragePooling2D(), name=f"{name_prefix}_td_gap")(x)
-
+    
     # Feature dimension is now (batch, seq_len, 2048) for both streams
     x = LSTA_module(x, name_prefix=name_prefix)
     x = TSCI_module(x, name_prefix=name_prefix)
@@ -295,122 +294,123 @@ def augment_data(rgb_seq, flow_seq, img_h, img_w, augment=True):
 
     # 3. Color Jitter (on RGB only)
     if random.random() < 0.5:
-        rgb_seq = tf.image.random_brightness(rgb_seq, max_delta=0.2)
-        rgb_seq = tf.image.random_contrast(rgb_seq, lower=0.8, upper=1.2)
-        rgb_seq = tf.image.random_saturation(rgb_seq, lower=0.8, upper=1.2)
-        # Clip values to ensure they remain in [0, 1]
-        rgb_seq = tf.clip_by_value(rgb_seq, 0.0, 1.0)
-        # Convert back to numpy if needed downstream, depends on generator structure
-        # rgb_seq = rgb_seq.numpy()
+        if not isinstance(rgb_seq, tf.Tensor):
+            rgb_seq_tensor = tf.convert_to_tensor(rgb_seq, dtype=tf.float32)
+        else:
+            rgb_seq_tensor = rgb_seq
+        rgb_seq_tensor = tf.image.random_brightness(rgb_seq_tensor, max_delta=0.2)
+        rgb_seq_tensor = tf.image.random_contrast(rgb_seq_tensor, lower=0.8, upper=1.2)
+        rgb_seq_tensor = tf.image.random_saturation(rgb_seq_tensor, lower=0.8, upper=1.2)
+        rgb_seq_tensor = tf.clip_by_value(rgb_seq_tensor, 0.0, 1.0)
+        rgb_seq = rgb_seq_tensor.numpy()
 
     return rgb_seq, flow_seq
 
 class DataGenerator(Sequence):
     """Generates batches of pre-computed RGB and Flow data."""
     def __init__(self, video_paths, labels, batch_size, num_classes,
-                 seq_length, img_size, # img_size_cv no longer needed here
-                 flow_dir, rgb_dir, # Add rgb_dir
+                 seq_length, img_size, flow_dir, rgb_dir, # Added rgb_dir
                  dataset_base_path, augment=False):
-        self.video_paths = video_paths
+        self.video_paths = video_paths # Original video paths used to find corresponding npy files
         self.labels = labels
         self.batch_size = batch_size
         self.num_classes = num_classes
         self.seq_length = seq_length
         self.img_h, self.img_w = img_size # Keras format (h, w)
-        # self.img_size_cv = img_size_cv # No longer needed
         self.flow_dir = flow_dir
-        self.rgb_dir = rgb_dir # Store rgb_dir path
+        self.rgb_dir = rgb_dir # Store RGB data path
         self.dataset_base_path = dataset_base_path
         self.augment = augment
         self.indices = np.arange(len(self.video_paths))
-        # Ensure shuffling happens if it's the training generator
+        # Initial shuffle only for training generator
         if self.augment:
-            self.on_epoch_end() # Shuffle indices initially for training
+             self.on_epoch_end()
 
     def __len__(self):
         """Number of batches per epoch."""
         return int(np.floor(len(self.video_paths) / self.batch_size))
 
     def __getitem__(self, index):
-        """Generate one batch of data, skipping samples with missing flow or rgb."""
-        # Generate indices of the batch
+        """Generate one batch of data, skipping samples with missing RGB or Flow."""
         batch_indices = self.indices[index*self.batch_size:(index+1)*self.batch_size]
-
-        # Get video paths and labels for this batch
         batch_video_paths = [self.video_paths[k] for k in batch_indices]
         batch_labels = [self.labels[k] for k in batch_indices]
 
-        # Initialize lists to hold valid samples for this batch
         valid_X_rgb = []
         valid_X_flow = []
         valid_y = []
 
-        # Generate data for each item in the batch
         for video_path, label in zip(batch_video_paths, batch_labels):
-            try: # Start try block for this single video
-                # 1. Construct the expected file paths for RGB and Flow
+            try:
+                # 1. Construct expected paths for BOTH precomputed files
                 relative_path = os.path.relpath(video_path, self.dataset_base_path)
                 base_filename = os.path.splitext(os.path.basename(relative_path))[0]
-                sub_dir = os.path.dirname(relative_path)
+                flow_filename = os.path.join(self.flow_dir,
+                                             os.path.dirname(relative_path),
+                                             f"{base_filename}_flow.npy")
+                rgb_filename = os.path.join(self.rgb_dir, # Use rgb_dir
+                                            os.path.dirname(relative_path),
+                                            f"{base_filename}_rgb.npy") # Use _rgb.npy convention
 
-                flow_filename = os.path.join(self.flow_dir, sub_dir, f"{base_filename}_flow.npy")
-                rgb_filename = os.path.join(self.rgb_dir, sub_dir, f"{base_filename}_rgb.npy")
-
-                # 2. Check if BOTH files exist BEFORE loading
+                # 2. Check if BOTH files exist
                 if not os.path.exists(flow_filename) or not os.path.exists(rgb_filename):
-                    # Skip if either RGB or Flow file is missing
-                    continue # Move to the next video_path in the loop
+                    # If either file is missing, skip this sample
+                    continue # Move to the next video_path
 
                 # --- If both files exist --- 
-                # 3. Load pre-computed RGB and Flow
+                # 3. Load pre-computed RGB (already normalized)
                 rgb_sequence = np.load(rgb_filename)
+
+                # 4. Load pre-computed flow
                 flow_sequence = np.load(flow_filename)
 
-                # Optional: Verify shapes after loading (can add checks if needed)
-                # if rgb_sequence.shape != (self.seq_length, self.img_h, self.img_w, 3): ...
-                # if flow_sequence.shape != (self.seq_length, self.img_h, self.img_w, 2): ...
+                # Check shapes (optional but good practice)
+                expected_rgb_shape = (self.seq_length, self.img_h, self.img_w, 3)
+                expected_flow_shape = (self.seq_length, self.img_h, self.img_w, 2)
+                if rgb_sequence.shape != expected_rgb_shape or flow_sequence.shape != expected_flow_shape:
+                    print(f"Warning: Shape mismatch for precomputed data of {base_filename}. Skipping.", file=sys.stderr)
+                    print(f"  RGB shape: {rgb_sequence.shape}, Expected: {expected_rgb_shape}", file=sys.stderr)
+                    print(f"  Flow shape: {flow_sequence.shape}, Expected: {expected_flow_shape}", file=sys.stderr)
+                    continue
 
-                # 4. Normalize Flow (RGB is assumed pre-normalized)
+                # 5. Normalize Flow (RGB is already normalized)
                 flow_sequence = normalize_flow(flow_sequence)
 
-                # 5. Data Augmentation (synchronized)
+                # 6. Data Augmentation (synchronized)
                 rgb_sequence, flow_sequence = augment_data(rgb_sequence, flow_sequence,
                                                          self.img_h, self.img_w,
                                                          self.augment)
 
-                # 6. Append valid sample to lists
+                # 7. Append valid sample to lists
                 valid_X_rgb.append(rgb_sequence)
                 valid_X_flow.append(flow_sequence)
                 valid_y.append(to_categorical(label, num_classes=self.num_classes))
 
-            except Exception as e: # Catch loading or processing errors
+            except Exception as e: # Catch loading or other errors
                 print(f"Error processing precomputed data for {video_path}: {e}", file=sys.stderr)
-                # Skip this sample by continuing the loop
                 continue
 
-        # --- After processing all items for the requested batch index ---
-        # If no valid samples were found in this batch index range, return empty arrays
+        # --- After processing batch --- 
         if not valid_y:
-             print(f"Warning: Returning empty batch for index {index}", file=sys.stderr)
+             # Return empty arrays if no valid samples found
              rgb_shape = (0, self.seq_length, self.img_h, self.img_w, 3)
              flow_shape = (0, self.seq_length, self.img_h, self.img_w, 2)
              label_shape = (0, self.num_classes)
-             # Return tuple matching element_spec
              return ((np.zeros(rgb_shape, dtype=np.float32), np.zeros(flow_shape, dtype=np.float32)), np.zeros(label_shape, dtype=np.float32))
 
-        # Convert lists of valid samples to NumPy arrays
         batch_X_rgb = np.array(valid_X_rgb, dtype=np.float32)
         batch_X_flow = np.array(valid_X_flow, dtype=np.float32)
         batch_y = np.array(valid_y, dtype=np.float32)
 
-        # Return a tuple: ((features_tuple), labels)
+        # Return tuple: ((features_tuple), labels)
         return ((batch_X_rgb, batch_X_flow), batch_y)
 
     def on_epoch_end(self):
-        """Shuffle indices after each epoch."""
-        np.random.shuffle(self.indices)
+        """Shuffle indices after each epoch only for training."""
+        if self.augment: # Only shuffle if it's the training generator
+            np.random.shuffle(self.indices)
 
-    @property # Use property for compatibility with tf.data.Dataset.from_generator
+    @property
     def element_spec(self):
         # Use None for batch dimension to allow variable batch sizes
         rgb_spec = tf.TensorSpec(shape=(None, self.seq_length, self.img_h, self.img_w, 3), dtype=tf.float32)
@@ -420,10 +420,9 @@ class DataGenerator(Sequence):
         return ((rgb_spec, flow_spec), label_spec)
 
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
-                             flow_dir, rgb_dir, # Add rgb_dir
-                             dataset_base_path, epochs=30):
+                             flow_dir, rgb_dir, dataset_base_path, epochs=30): # Added rgb_dir
     """
-    Train the Two-Stream ACA-Net using data generators loading precomputed data.
+    Train the Two-Stream ACA-Net using data generators.
     """
     print(f"Training with {len(train_paths)} samples, validating with {len(val_paths)} samples.")
 
@@ -431,16 +430,14 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     train_generator = DataGenerator(
         video_paths=train_paths, labels=train_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
-        flow_dir=flow_dir, rgb_dir=rgb_dir, # Pass rgb_dir
-        dataset_base_path=dataset_base_path,
-        augment=True # Enable augmentation for training
+        flow_dir=flow_dir, rgb_dir=rgb_dir, dataset_base_path=dataset_base_path,
+        augment=True
     )
     val_generator = DataGenerator(
         video_paths=val_paths, labels=val_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
-        flow_dir=flow_dir, rgb_dir=rgb_dir, # Pass rgb_dir
-        dataset_base_path=dataset_base_path,
-        augment=False # No augmentation for validation
+        flow_dir=flow_dir, rgb_dir=rgb_dir, dataset_base_path=dataset_base_path,
+        augment=False
     )
     
     # Define model input shapes
@@ -459,7 +456,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
     print("Model Compiled.")
     model.summary()
-
+    
     # Define callbacks (Ensure F1 score monitoring if used)
     checkpoint_path = "two_stream_aca_net_best.keras" # Use .keras extension
     checkpoint = ModelCheckpoint(
@@ -507,20 +504,16 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     
     return model, history
 
-def evaluate_model(model, test_paths, test_labels,
-                   flow_dir, rgb_dir, # Add rgb_dir
-                   dataset_base_path):
+def evaluate_model(model, test_paths, test_labels, flow_dir, rgb_dir, dataset_base_path): # Added rgb_dir
     """
-    Evaluate the trained model using a data generator loading precomputed data.
+    Evaluate the trained model using a data generator for the test set.
     """
     print(f"Evaluating on {len(test_paths)} test samples...")
 
-    # Create test generator, passing rgb_dir
     test_generator = DataGenerator(
         video_paths=test_paths, labels=test_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
-        flow_dir=flow_dir, rgb_dir=rgb_dir, # Pass rgb_dir
-        dataset_base_path=dataset_base_path,
+        flow_dir=flow_dir, rgb_dir=rgb_dir, dataset_base_path=dataset_base_path, # Pass rgb_dir
         augment=False # No augmentation for testing
     )
 
@@ -552,9 +545,9 @@ def evaluate_model(model, test_paths, test_labels,
     # Try to calculate AUC
     try:
         # Use one-hot encoded true labels for AUC
-        metrics['auc'] = roc_auc_score(y_true_cat, y_pred_prob, multi_class='ovr')
+        metrics['auc'] = roc_auc_score(y_true_cat, y_pred_prob, multi_class='ovr', average='weighted')
     except Exception as e:
-        print(f"Could not calculate AUC: {e}")
+        print(f"Could not calculate AUC: {e}", file=sys.stderr)
         metrics['auc'] = 'N/A'
     
     return metrics
@@ -585,24 +578,24 @@ def get_video_paths_and_labels(dataset_path):
     return video_paths, labels, label2id
 
 def main(args):
-    """Main function modified to use generators and precomputed RGB/flow."""
+    """Main function modified to use generators and precomputed flow."""
     print("Two-Stream ACA-Net Training Pipeline")
     print(f"Dataset Path: {args.dataset_path}")
-    print(f"RGB Data Path: {args.rgb_path}") # Use new arg
     print(f"Flow Data Path: {args.flow_path}")
+    print(f"RGB Data Path: {args.rgb_path}") # Added print for RGB path
     print(f"Epochs: {args.epochs}")
 
-    # Check if dataset, RGB, and flow directories exist
+    # Check if dataset and flow directories exist
     if not os.path.isdir(args.dataset_path):
         print(f"Error: Dataset directory not found at: {args.dataset_path}", file=sys.stderr)
         return
-    if not os.path.isdir(args.rgb_path):
-        print(f"Error: RGB data directory not found at: {args.rgb_path}", file=sys.stderr)
-        print("Please run precompute_rgb.py first and ensure path is correct.")
-        return
     if not os.path.isdir(args.flow_path):
         print(f"Error: Flow data directory not found at: {args.flow_path}", file=sys.stderr)
-        print("Please run precompute_flow.py first and ensure path is correct.")
+        print("Please run precompute_flow.py first.")
+        return
+    if not os.path.isdir(args.rgb_path): # Check for RGB path
+        print(f"Error: Precomputed RGB data directory not found at: {args.rgb_path}", file=sys.stderr)
+        print("Please run precompute_rgb.py first or check the path.")
         return
     
     # Get video paths and integer labels
@@ -637,20 +630,32 @@ def main(args):
         stratify=train_val_labels, random_state=42
     )
     print(f"Train samples: {len(train_paths)}, Validation samples: {len(val_paths)}, Test samples: {len(test_paths)}")
-
-    # Train model using generators, passing rgb_path
+    
+    # Train model using generators, passing rgb_dir
     print("Starting model training...")
     model, history = train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                                           flow_dir=args.flow_path,
-                                          rgb_dir=args.rgb_path, # Pass rgb_path
+                                          rgb_dir=args.rgb_path, # Pass RGB path
                                           dataset_base_path=args.dataset_path,
                                           epochs=args.epochs)
-
-    # Evaluate model using generator, passing rgb_path
+    
+    # Evaluate model using generator, passing rgb_dir
     print("Starting model evaluation on test set...")
-    metrics = evaluate_model(model, test_paths, test_labels,
+    best_model_path = "two_stream_aca_net_best.keras"
+    if os.path.exists(best_model_path):
+        print(f"Loading best model from {best_model_path} for evaluation.")
+        try:
+             eval_model = tf.keras.models.load_model(best_model_path)
+        except Exception as e: 
+             print(f"Warning: Could not load best model...", file=sys.stderr)
+             eval_model = model # Fallback
+    else:
+        print("Warning: Best model checkpoint not found...", file=sys.stderr)
+        eval_model = model # Fallback
+        
+    metrics = evaluate_model(eval_model, test_paths, test_labels,
                              flow_dir=args.flow_path,
-                             rgb_dir=args.rgb_path, # Pass rgb_path
+                             rgb_dir=args.rgb_path, # Pass RGB path
                              dataset_base_path=args.dataset_path)
     
     # Print results
@@ -664,7 +669,7 @@ def main(args):
     print(metrics['confusion_matrix'])
     
     # Save the final (best) model - already saved by ModelCheckpoint
-    print(f"\nBest model saved during training to: {checkpoint_path}")
+    print(f"\nBest model saved during training to: {best_model_path}")
 
     # Optional: Plot training history
     # Implement plot_history function if needed
@@ -673,13 +678,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Two-Stream ACA-Net on Basketball-51.")
     parser.add_argument('--dataset_path', type=str, default='/kaggle/input/basketball-51/Basketball-51',
                         help='Path to the root directory of the Basketball-51 video dataset.')
-    # Add argument for RGB data path
-    parser.add_argument('--rgb_path', type=str, default=RGB_DIR, # Use RGB_DIR constant
-                        help='Path to the directory containing precomputed RGB .npy files.')
     parser.add_argument('--flow_path', type=str, default=FLOW_DIR,
                         help='Path to the directory containing precomputed flow .npy files.')
+    parser.add_argument('--rgb_path', type=str, default=RGB_DIR,
+                        help='Path to the directory containing precomputed RGB .npy files.')
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of training epochs.')
+    # Add other arguments if needed (e.g., batch size, learning rate)
 
     args = parser.parse_args()
     main(args) 
