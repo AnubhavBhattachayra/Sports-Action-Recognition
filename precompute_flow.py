@@ -140,6 +140,8 @@ def main():
                         help='Path to the directory where flow .npy files will be saved.')
     parser.add_argument('--workers', type=int, default=max(1, cpu_count() // 2),
                         help='Number of worker processes for parallel computation.')
+    parser.add_argument('--subset_fraction', type=float, default=0.5,
+                        help='Fraction of the dataset to process (e.g., 0.5 for 50%).')
     args = parser.parse_args()
 
     print(f"Using {args.workers} worker processes.")
@@ -149,14 +151,14 @@ def main():
     if not video_paths:
         return # Exit if no videos found
 
-    # --- Added: Select 50% of the videos ---
+    # --- Select Subset (Consistent Selection) ---
     SEED = 42 # Define a fixed seed
-    random.seed(SEED) # Set the random seed
-    num_videos_to_use = int(len(video_paths) * 0.50)
-    random.shuffle(video_paths) # Shuffle the list in place (now deterministic)
+    random.seed(SEED)
+    num_videos_to_use = int(len(video_paths) * args.subset_fraction)
+    random.shuffle(video_paths) # Shuffle deterministically
     video_paths_subset = video_paths[:num_videos_to_use]
-    print(f"Using a 50% subset: {len(video_paths_subset)} videos out of {len(video_paths)} total.")
-    # --- End Added Section ---
+    print(f"Using a {args.subset_fraction*100:.0f}% subset: {len(video_paths_subset)} videos out of {len(video_paths)} total.")
+    # --- End Subset Selection ---
 
     # Create the main output directory
     os.makedirs(args.output_path, exist_ok=True)
