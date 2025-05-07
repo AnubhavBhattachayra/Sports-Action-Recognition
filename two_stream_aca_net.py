@@ -454,6 +454,35 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     print(f"Image size: {IMG_SIZE}")
     print("=============================\n")
 
+    # Verify directories exist
+    if not os.path.exists(flow_dir):
+        raise ValueError(f"Flow directory does not exist: {flow_dir}")
+    if not os.path.exists(rgb_dir):
+        raise ValueError(f"RGB directory does not exist: {rgb_dir}")
+
+    # Verify sample files exist
+    sample_flow = os.path.join(flow_dir, "2p0", "2p0_v168_012503_x264_flow.npy")
+    sample_rgb = os.path.join(rgb_dir, "2p0", "2p0_v168_012503_x264_rgb.npy")
+    
+    print("\nVerifying sample files:")
+    print(f"Sample flow file exists: {os.path.exists(sample_flow)}")
+    print(f"Sample RGB file exists: {os.path.exists(sample_rgb)}")
+    
+    if not os.path.exists(sample_flow) or not os.path.exists(sample_rgb):
+        print("\nWARNING: Sample files not found. Please verify:")
+        print("1. The precomputed data was properly uploaded to Kaggle")
+        print("2. The directory structure matches the original dataset")
+        print("3. The file naming convention is correct (_flow.npy and _rgb.npy)")
+        print("\nExpected structure:")
+        print(f"{flow_dir}/")
+        print("  ├── 2p0/")
+        print("  │   └── 2p0_v168_012503_x264_flow.npy")
+        print("  └── ...")
+        print(f"{rgb_dir}/")
+        print("  ├── 2p0/")
+        print("  │   └── 2p0_v168_012503_x264_rgb.npy")
+        print("  └── ...")
+
     # Create data generators
     train_generator = DataGenerator(
         video_paths=train_paths, labels=train_labels, batch_size=BATCH_SIZE,
@@ -475,6 +504,11 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     
     optimizer = Adam(learning_rate=0.0001)
     model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+    
+    # Print model summary
+    print("\n=== Model Architecture ===")
+    model.summary()
+    print("=========================\n")
     
     # Calculate steps
     steps_per_epoch = len(train_generator)
