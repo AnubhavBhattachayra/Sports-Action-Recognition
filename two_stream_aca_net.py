@@ -309,22 +309,24 @@ def augment_data(rgb_seq, flow_seq, img_h, img_w, augment=True):
 class DataGenerator(Sequence):
     """Generates batches of pre-computed RGB and Flow data."""
     def __init__(self, video_paths, labels, batch_size, num_classes,
-                 seq_length, img_size, flow_dir, rgb_dir, # Added rgb_dir
+                 seq_length, img_size, flow_dir, rgb_dir,
                  dataset_base_path, augment=False):
-        self.video_paths = video_paths # Original video paths used to find corresponding npy files
+        self.video_paths = video_paths
         self.labels = labels
         self.batch_size = batch_size
         self.num_classes = num_classes
         self.seq_length = seq_length
-        self.img_h, self.img_w = img_size # Keras format (h, w)
+        self.img_h, self.img_w = img_size
         self.flow_dir = flow_dir
-        self.rgb_dir = rgb_dir # Store RGB data path
+        self.rgb_dir = rgb_dir
         self.dataset_base_path = dataset_base_path
         self.augment = augment
         self.indices = np.arange(len(self.video_paths))
-        # Initial shuffle only for training generator
+        print(f"DataGenerator initialized with {len(self.video_paths)} videos")
+        print(f"Flow directory: {self.flow_dir}")
+        print(f"RGB directory: {self.rgb_dir}")
         if self.augment:
-             self.on_epoch_end()
+            self.on_epoch_end()
 
     def __len__(self):
         """Number of batches per epoch."""
@@ -339,6 +341,7 @@ class DataGenerator(Sequence):
         valid_X_rgb = []
         valid_X_flow = []
         valid_y = []
+        skipped_count = 0
 
         for video_path, label in zip(batch_video_paths, batch_labels):
             try:
@@ -348,61 +351,79 @@ class DataGenerator(Sequence):
                 flow_filename = os.path.join(self.flow_dir,
                                              os.path.dirname(relative_path),
                                              f"{base_filename}_flow.npy")
-                rgb_filename = os.path.join(self.rgb_dir, # Use rgb_dir
+                rgb_filename = os.path.join(self.rgb_dir,
                                             os.path.dirname(relative_path),
-                                            f"{base_filename}_rgb.npy") # Use _rgb.npy convention
+                                            f"{base_filename}_rgb.npy")
+
+                # Debug: Print paths for first batch only
+                if index == 0 and len(valid_X_rgb) == 0:
+                    print(f"\nDebug - First sample in batch:")
+                    print(f"Video path: {video_path}")
+                    print(f"Flow file: {flow_filename}")
+                    print(f"RGB file: {rgb_filename}")
 
                 # 2. Check if BOTH files exist
                 if not os.path.exists(flow_filename) or not os.path.exists(rgb_filename):
-                    # If either file is missing, skip this sample
-                    continue # Move to the next video_path
+                    skipped_count += 1
+                    if index == 0:  # Only print for first batch
+                        print(f"Skipping sample - Missing files for {base_filename}")
+                        if not os.path.exists(flow_filename):
+                            print(f"Missing flow file: {flow_filename}")
+                        if not os.path.exists(rgb_filename):
+                            print(f"Missing RGB file: {rgb_filename}")
+                    continue
 
-                # --- If both files exist --- 
-                # 3. Load pre-computed RGB (already normalized)
+                # 3. Load pre-computed RGB
                 rgb_sequence = np.load(rgb_filename)
-
-                # 4. Load pre-computed flow
                 flow_sequence = np.load(flow_filename)
 
-                # Check shapes (optional but good practice)
+                # Debug shapes for first batch
+                if index == 0 and len(valid_X_rgb) == 0:
+                    print(f"Loaded shapes - RGB: {rgb_sequence.shape}, Flow: {flow_sequence.shape}")
+
+                # Check shapes
                 expected_rgb_shape = (self.seq_length, self.img_h, self.img_w, 3)
                 expected_flow_shape = (self.seq_length, self.img_h, self.img_w, 2)
                 if rgb_sequence.shape != expected_rgb_shape or flow_sequence.shape != expected_flow_shape:
-                    print(f"Warning: Shape mismatch for precomputed data of {base_filename}. Skipping.", file=sys.stderr)
-                    print(f"  RGB shape: {rgb_sequence.shape}, Expected: {expected_rgb_shape}", file=sys.stderr)
-                    print(f"  Flow shape: {flow_sequence.shape}, Expected: {expected_flow_shape}", file=sys.stderr)
+                    print(f"Warning: Shape mismatch for {base_filename}. Skipping.")
+                    print(f"  RGB shape: {rgb_sequence.shape}, Expected: {expected_rgb_shape}")
+                    print(f"  Flow shape: {flow_sequence.shape}, Expected: {expected_flow_shape}")
+                    skipped_count += 1
                     continue
 
-                # 5. Normalize Flow (RGB is already normalized)
+                # Process and append valid sample
                 flow_sequence = normalize_flow(flow_sequence)
-
-                # 6. Data Augmentation (synchronized)
                 rgb_sequence, flow_sequence = augment_data(rgb_sequence, flow_sequence,
                                                          self.img_h, self.img_w,
                                                          self.augment)
 
-                # 7. Append valid sample to lists
                 valid_X_rgb.append(rgb_sequence)
                 valid_X_flow.append(flow_sequence)
                 valid_y.append(to_categorical(label, num_classes=self.num_classes))
 
-            except Exception as e: # Catch loading or other errors
-                print(f"Error processing precomputed data for {video_path}: {e}", file=sys.stderr)
+            except Exception as e:
+                print(f"Error processing {video_path}: {str(e)}")
+                skipped_count += 1
                 continue
 
-        # --- After processing batch --- 
+        # Print batch statistics for first batch
+        if index == 0:
+            print(f"\nBatch {index} statistics:")
+            print(f"Total samples in batch: {len(batch_video_paths)}")
+            print(f"Valid samples: {len(valid_X_rgb)}")
+            print(f"Skipped samples: {skipped_count}")
+
         if not valid_y:
-             # Return empty arrays if no valid samples found
-             rgb_shape = (0, self.seq_length, self.img_h, self.img_w, 3)
-             flow_shape = (0, self.seq_length, self.img_h, self.img_w, 2)
-             label_shape = (0, self.num_classes)
-             return ((np.zeros(rgb_shape, dtype=np.float32), np.zeros(flow_shape, dtype=np.float32)), np.zeros(label_shape, dtype=np.float32))
+            rgb_shape = (0, self.seq_length, self.img_h, self.img_w, 3)
+            flow_shape = (0, self.seq_length, self.img_h, self.img_w, 2)
+            label_shape = (0, self.num_classes)
+            return ((np.zeros(rgb_shape, dtype=np.float32), np.zeros(flow_shape, dtype=np.float32)), 
+                    np.zeros(label_shape, dtype=np.float32))
 
         batch_X_rgb = np.array(valid_X_rgb, dtype=np.float32)
         batch_X_flow = np.array(valid_X_flow, dtype=np.float32)
         batch_y = np.array(valid_y, dtype=np.float32)
 
-        # Return tuple: ((features_tuple), labels)
         return ((batch_X_rgb, batch_X_flow), batch_y)
 
     def on_epoch_end(self):
@@ -420,13 +441,20 @@ class DataGenerator(Sequence):
         return ((rgb_spec, flow_spec), label_spec)
 
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
-                             flow_dir, rgb_dir, dataset_base_path, epochs=30): # Added rgb_dir
-    """
-    Train the Two-Stream ACA-Net using data generators.
-    """
-    print(f"Training with {len(train_paths)} samples, validating with {len(val_paths)} samples.")
+                             flow_dir, rgb_dir, dataset_base_path, epochs=30):
+    """Train the Two-Stream ACA-Net using data generators."""
+    print(f"\n=== Training Configuration ===")
+    print(f"Training samples: {len(train_paths)}")
+    print(f"Validation samples: {len(val_paths)}")
+    print(f"Flow directory: {flow_dir}")
+    print(f"RGB directory: {rgb_dir}")
+    print(f"Dataset base path: {dataset_base_path}")
+    print(f"Batch size: {BATCH_SIZE}")
+    print(f"Sequence length: {SEQ_LENGTH}")
+    print(f"Image size: {IMG_SIZE}")
+    print("=============================\n")
 
-    # Create data generators, passing rgb_dir
+    # Create data generators
     train_generator = DataGenerator(
         video_paths=train_paths, labels=train_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
@@ -439,68 +467,75 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
         flow_dir=flow_dir, rgb_dir=rgb_dir, dataset_base_path=dataset_base_path,
         augment=False
     )
-    
-    # Define model input shapes
+
+    # Build and compile model
     rgb_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 3)
     flow_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 2)
-    
-    # Build the model
     model = build_two_stream_aca_net(rgb_shape, flow_shape, NUM_CLASSES)
-
-    # Compile the model (Optimizer and Loss from Step 6)
-    optimizer = Adam(learning_rate=0.0001)
-    loss = 'categorical_crossentropy'
-    # Add F1 Score metric if needed (requires definition like in original main.py)
-    metrics = ['accuracy'] # Add F1ScoreMetric(...) if available
-
-    model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
-    print("Model Compiled.")
-    model.summary()
     
-    # Define callbacks (Ensure F1 score monitoring if used)
-    checkpoint_path = "two_stream_aca_net_best.keras" # Use .keras extension
+    optimizer = Adam(learning_rate=0.0001)
+    model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+    
+    # Calculate steps
+    steps_per_epoch = len(train_generator)
+    validation_steps = len(val_generator)
+    
+    print(f"\n=== Training Parameters ===")
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print(f"Validation steps: {validation_steps}")
+    print(f"Total epochs: {epochs}")
+    print("===========================\n")
+
+    # Callbacks with debug prints
+    class DebugCallback(tf.keras.callbacks.Callback):
+        def on_epoch_begin(self, epoch, logs=None):
+            print(f"\nStarting epoch {epoch + 1}/{epochs}")
+            print("Loading training data...")
+            
+        def on_epoch_end(self, epoch, logs=None):
+            print(f"\nCompleted epoch {epoch + 1}/{epochs}")
+            print(f"Training loss: {logs.get('loss'):.4f}")
+            print(f"Training accuracy: {logs.get('accuracy'):.4f}")
+            print(f"Validation loss: {logs.get('val_loss'):.4f}")
+            print(f"Validation accuracy: {logs.get('val_accuracy'):.4f}")
+
     checkpoint = ModelCheckpoint(
-        checkpoint_path,
-        monitor='val_accuracy', # Or val_f1_score if metric is added
+        "two_stream_aca_net_best.keras",
+        monitor='val_accuracy',
         save_best_only=True,
         mode='max',
-        verbose=1,
-        save_weights_only=False # Save entire model
-    )
-    early_stopping = EarlyStopping(
-        monitor='val_accuracy', # Or val_f1_score
-        patience=10, # Increased patience slightly
-        mode='max',
-        verbose=1,
-        restore_best_weights=True # Restore best weights at the end
-    )
-    reduce_lr = ReduceLROnPlateau(
-        monitor='val_loss',
-        factor=0.2,
-        patience=5, # Reduce LR if val_loss plateaus for 5 epochs
-        min_lr=1e-6,
         verbose=1
     )
     
-    # Calculate steps per epoch
-    steps_per_epoch = len(train_generator)
-    validation_steps = len(val_generator)
+    early_stopping = EarlyStopping(
+        monitor='val_accuracy',
+        patience=10,
+        mode='max',
+        verbose=1,
+        restore_best_weights=True
+    )
+    
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.2,
+        patience=5,
+        min_lr=1e-6,
+        verbose=1
+    )
 
-    print(f"Steps per epoch: {steps_per_epoch}")
-    print(f"Validation steps: {validation_steps}")
-
-    # Train the model using the generator
+    # Add debug callback
+    debug_callback = DebugCallback()
+    
+    print("\nStarting training...")
     history = model.fit(
         train_generator,
         validation_data=val_generator,
         epochs=epochs,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
-        callbacks=[checkpoint, early_stopping, reduce_lr]
+        callbacks=[checkpoint, early_stopping, reduce_lr, debug_callback],
+        verbose=1
     )
-
-    # Load best weights if not restored by EarlyStopping
-    # model.load_weights(checkpoint_path) # Optional: Explicitly load best if needed
     
     return model, history
 
