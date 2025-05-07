@@ -38,8 +38,8 @@ IMG_SIZE_CV = (160, 120) # width, height for cv2.resize
 NUM_CLASSES = 8
 BATCH_SIZE = 16
 WEIGHT_DECAY = 1e-4
-FLOW_DIR = '/kaggle/input/flow-data-50-basketball-51/flow_data' # Default Flow path
-RGB_DIR = './rgb_data' # Default path for precomputed RGB
+FLOW_DIR = '/kaggle/input/flow-rgb-data-basketball-51-50/flow_data/flow_data' # Updated Flow path
+RGB_DIR = '/kaggle/input/flow-rgb-data-basketball-51-50/rgb_data/rgb_data' # Updated RGB path
 
 # Helper: Ensure correct input shape for TimeDistributed ResNet
 class CorrectShapeLayer(tf.keras.layers.Layer):
