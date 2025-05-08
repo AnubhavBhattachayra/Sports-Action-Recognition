@@ -74,7 +74,7 @@ def extract_frames(video_path):
         cap.release()
         
         # Convert to numpy arrays
-        rgb_sequence = np.array(rgb_frames, dtype=np.float32) / 255.0  # Normalize RGB
+        rgb_sequence = np.array(rgb_frames, dtype=np.uint8)  # Store as uint8
         flow_sequence = np.array(flow_frames, dtype=np.float32)
         
         # Normalize flow
@@ -95,7 +95,7 @@ def normalize_flow(flow_sequence):
 
 def process_video(args):
     """Process a single video and save both RGB and flow data."""
-    video_path, output_base = args
+    video_path, output_base, dataset_path = args
     try:
         # Extract frames and compute flow
         rgb_sequence, flow_sequence = extract_frames(video_path)
@@ -104,20 +104,20 @@ def process_video(args):
             return False
             
         # Create output paths
-        relative_path = os.path.relpath(video_path, args.dataset_path)
+        relative_path = os.path.relpath(video_path, dataset_path)
         base_filename = os.path.splitext(os.path.basename(relative_path))[0]
         output_dir = os.path.join(output_base, os.path.dirname(relative_path))
         
         # Create output directories if they don't exist
         os.makedirs(output_dir, exist_ok=True)
         
-        # Save RGB data
-        rgb_output_path = os.path.join(output_dir, f"{base_filename}_rgb.npy")
-        np.save(rgb_output_path, rgb_sequence)
+        # Save RGB data with compression
+        rgb_output_path = os.path.join(output_dir, f"{base_filename}_rgb.npz")
+        np.savez_compressed(rgb_output_path, data=rgb_sequence)
         
-        # Save flow data
-        flow_output_path = os.path.join(output_dir, f"{base_filename}_flow.npy")
-        np.save(flow_output_path, flow_sequence)
+        # Save flow data with compression
+        flow_output_path = os.path.join(output_dir, f"{base_filename}_flow.npz")
+        np.savez_compressed(flow_output_path, data=flow_sequence)
         
         return True
         
@@ -158,7 +158,7 @@ def main():
     # Process videos in parallel
     with Pool(args.workers) as pool:
         # Create arguments for each video
-        process_args = [(path, args.output_path) for path in video_paths]
+        process_args = [(path, args.output_path, args.dataset_path) for path in video_paths]
         
         # Process videos with progress bar
         results = list(tqdm(

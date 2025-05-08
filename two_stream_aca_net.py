@@ -405,7 +405,7 @@ class DataGenerator(Sequence):
                 print(f"Error processing {video_path}: {str(e)}")
                 skipped_count += 1
                 continue
-
+                
         # Print batch statistics for first batch
         if index == 0:
             print(f"\nBatch {index} statistics:")
@@ -556,7 +556,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
         min_lr=1e-6,
         verbose=1
     )
-
+    
     # Add debug callback
     debug_callback = DebugCallback()
     
