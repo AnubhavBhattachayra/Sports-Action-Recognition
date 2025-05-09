@@ -30,6 +30,7 @@ from tensorflow.keras.utils import Sequence, to_categorical # Added Sequence
 from sklearn.model_selection import train_test_split # For splitting paths
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix # For eval
 from tqdm import tqdm # Keep for evaluation progress
+import time # Added for time calculations
 
 # Configuration
 SEQ_LENGTH = 50
@@ -568,23 +569,54 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     
     # Custom callback for progress bar
     class ProgressCallback(tf.keras.callbacks.Callback):
+        def __init__(self):
+            super().__init__()
+            self.epoch_start_time = None
+            self.batch_start_time = None
+            
         def on_epoch_begin(self, epoch, logs=None):
+            self.epoch_start_time = time.time()
             print(f"\nEpoch {epoch + 1}/{epochs}")
             self.progbar = tqdm(total=steps_per_epoch, 
                               desc="Training",
                               position=0,
                               leave=True)
             
+        def on_batch_begin(self, batch, logs=None):
+            self.batch_start_time = time.time()
+            
         def on_batch_end(self, batch, logs=None):
+            # Calculate time per batch
+            batch_time = time.time() - self.batch_start_time
+            
+            # Calculate estimated time remaining for epoch
+            batches_remaining = steps_per_epoch - (batch + 1)
+            epoch_time_remaining = batch_time * batches_remaining
+            
+            # Calculate estimated time remaining for all epochs
+            epochs_remaining = epochs - (self.model.epoch + 1)
+            total_time_remaining = epoch_time_remaining + (epochs_remaining * steps_per_epoch * batch_time)
+            
+            # Format times
+            epoch_remaining_str = time.strftime('%H:%M:%S', time.gmtime(epoch_time_remaining))
+            total_remaining_str = time.strftime('%H:%M:%S', time.gmtime(total_time_remaining))
+            
             self.progbar.update(1)
             self.progbar.set_postfix({
                 'loss': f"{logs.get('loss', 0):.4f}",
-                'accuracy': f"{logs.get('accuracy', 0):.4f}"
+                'accuracy': f"{logs.get('accuracy', 0):.4f}",
+                'batch_time': f"{batch_time:.1f}s",
+                'epoch_remaining': epoch_remaining_str,
+                'total_remaining': total_remaining_str
             })
             
         def on_epoch_end(self, epoch, logs=None):
+            epoch_time = time.time() - self.epoch_start_time
+            epoch_time_str = time.strftime('%H:%M:%S', time.gmtime(epoch_time))
             self.progbar.close()
-            print(f"\nValidation:")
+            
+            print(f"\nEpoch {epoch + 1} completed in {epoch_time_str}")
+            print(f"Validation:")
             val_progbar = tqdm(total=validation_steps,
                              desc="Validating",
                              position=0,
