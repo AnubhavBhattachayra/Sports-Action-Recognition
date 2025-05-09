@@ -740,28 +740,15 @@ def main(args):
          print(f"Error reading dataset: {e}", file=sys.stderr)
          return
 
-    # --- Added: Select 50% of the dataset ---
-    num_total_videos = len(video_paths)
-    indices = list(range(num_total_videos))
-    SEED = 42 # Use the same fixed seed as in precompute_flow.py
-    random.seed(SEED) # Set the random seed
-    random.shuffle(indices) # Shuffle the indices (now deterministic)
-    sample_indices = indices[:int(num_total_videos * 0.50)]
-
-    video_paths_subset = [video_paths[i] for i in sample_indices]
-    labels_subset = [labels[i] for i in sample_indices]
-    print(f"Using a 50% subset: {len(video_paths_subset)} videos out of {num_total_videos} total for train/val/test split.")
-    # --- End Added Section ---
-
-    # Train/Validation/Test split on the *subset* of paths and labels
-    print("Splitting data subset into training, validation, and test sets...")
+    # Train/Validation/Test split on the full dataset
+    print("Splitting data into training, validation, and test sets...")
     # First split into train+val and test
     train_val_paths, test_paths, train_val_labels, test_labels = train_test_split(
-        video_paths_subset, labels_subset, test_size=0.2, stratify=labels_subset, random_state=42 # Use subset
+        video_paths, labels, test_size=0.2, stratify=labels, random_state=42
     )
     # Then split train+val into train and validation
     train_paths, val_paths, train_labels, val_labels = train_test_split(
-        train_val_paths, train_val_labels, test_size=0.2, # 20% of original train_val -> 16% of total subset
+        train_val_paths, train_val_labels, test_size=0.2, # 20% of original train_val -> 16% of total
         stratify=train_val_labels, random_state=42
     )
     print(f"Train samples: {len(train_paths)}, Validation samples: {len(val_paths)}, Test samples: {len(test_paths)}")
