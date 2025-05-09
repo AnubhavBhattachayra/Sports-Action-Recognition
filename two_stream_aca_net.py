@@ -31,6 +31,7 @@ from sklearn.model_selection import train_test_split # For splitting paths
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix # For eval
 from tqdm import tqdm # Keep for evaluation progress
 import time # Added for time calculations
+import gc # Added for garbage collection
 
 # Configuration
 SEQ_LENGTH = 50
@@ -583,6 +584,10 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     print(f"RGB input shape: {rgb_shape}")
     print(f"Flow input shape: {flow_shape}")
     
+    # Clear any existing models and memory
+    tf.keras.backend.clear_session()
+    gc.collect()  # Force garbage collection
+    
     model = build_two_stream_aca_net(rgb_shape, flow_shape, NUM_CLASSES)
     
     # Print model summary
@@ -590,8 +595,16 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     model.summary()
     
     # Optimize memory usage
-    tf.keras.backend.clear_session()
     tf.config.optimizer.set_jit(True)  # Enable XLA compilation
+    
+    # Set memory growth
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print(f"GPU memory growth error: {e}")
     
     optimizer = Adam(learning_rate=0.0001)
     model.compile(optimizer=optimizer,
@@ -619,9 +632,11 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
             self.epoch_start_time = None
             self.batch_start_time = None
             self.last_batch_time = 0
+            self.batch_count = 0
             
         def on_epoch_begin(self, epoch, logs=None):
             self.epoch_start_time = time.time()
+            self.batch_count = 0
             print(f"\nEpoch {epoch + 1}/{epochs}")
             self.progbar = tqdm(total=steps_per_epoch, 
                               desc="Training",
@@ -629,52 +644,105 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                               leave=True)
             
         def on_batch_begin(self, batch, logs=None):
+            self.batch_count += 1
+            if batch == 0:
+                print("\nProcessing first batch...")
+                print("1. Loading data...")
+                print("2. Initializing model layers...")
+                print("3. Computing first forward pass...")
+                print("4. Computing gradients...")
+                print("5. Updating weights...")
+                print("This may take a few minutes for the first batch.")
             self.batch_start_time = time.time()
             
+            # Force garbage collection every 10 batches
+            if self.batch_count % 10 == 0:
+                gc.collect()
+            
         def on_batch_end(self, batch, logs=None):
-            # Calculate time per batch
-            batch_time = time.time() - self.batch_start_time
-            self.last_batch_time = batch_time
-            
-            # Calculate estimated time remaining for epoch
-            batches_remaining = steps_per_epoch - (batch + 1)
-            epoch_time_remaining = batch_time * batches_remaining
-            
-            # Calculate estimated time remaining for all epochs
-            epochs_remaining = epochs - (self.model.epoch + 1)
-            total_time_remaining = epoch_time_remaining + (epochs_remaining * steps_per_epoch * batch_time)
-            
-            # Format times
-            epoch_remaining_str = time.strftime('%H:%M:%S', time.gmtime(epoch_time_remaining))
-            total_remaining_str = time.strftime('%H:%M:%S', time.gmtime(total_time_remaining))
-            
-            self.progbar.update(1)
-            self.progbar.set_postfix({
-                'loss': f"{logs.get('loss', 0):.4f}",
-                'accuracy': f"{logs.get('accuracy', 0):.4f}",
-                'batch_time': f"{batch_time:.1f}s",
-                'epoch_remaining': epoch_remaining_str,
-                'total_remaining': total_remaining_str
-            })
+            try:
+                # Calculate time per batch
+                batch_time = time.time() - self.batch_start_time
+                self.last_batch_time = batch_time
+                
+                if batch == 0:
+                    print("\nFirst batch completed!")
+                    print(f"Time taken: {batch_time:.2f} seconds")
+                    print("Subsequent batches should be faster.")
+                
+                # Calculate estimated time remaining for epoch
+                batches_remaining = steps_per_epoch - (batch + 1)
+                epoch_time_remaining = batch_time * batches_remaining
+                
+                # Calculate estimated time remaining for all epochs
+                epochs_remaining = epochs - (self.model.epoch + 1)
+                total_time_remaining = epoch_time_remaining + (epochs_remaining * steps_per_epoch * batch_time)
+                
+                # Format times
+                epoch_remaining_str = time.strftime('%H:%M:%S', time.gmtime(epoch_time_remaining))
+                total_remaining_str = time.strftime('%H:%M:%S', time.gmtime(total_time_remaining))
+                
+                self.progbar.update(1)
+                self.progbar.set_postfix({
+                    'loss': f"{logs.get('loss', 0):.4f}",
+                    'accuracy': f"{logs.get('accuracy', 0):.4f}",
+                    'batch_time': f"{batch_time:.1f}s",
+                    'epoch_remaining': epoch_remaining_str,
+                    'total_remaining': total_remaining_str
+                })
+                
+                # Save checkpoint every 20 batches
+                if self.batch_count % 20 == 0:
+                    checkpoint_path = os.path.join(output_dir, f'checkpoint_batch_{self.batch_count}.keras')
+                    self.model.save(checkpoint_path)
+                    print(f"\nSaved checkpoint at batch {self.batch_count}")
+                
+            except Exception as e:
+                print(f"\nError in batch {batch}: {str(e)}")
+                # Save model state on error
+                try:
+                    error_path = os.path.join(output_dir, f'error_state_batch_{batch}.keras')
+                    self.model.save(error_path)
+                    print(f"Saved error state to {error_path}")
+                except:
+                    print("Failed to save error state")
+                raise e
             
         def on_epoch_end(self, epoch, logs=None):
-            epoch_time = time.time() - self.epoch_start_time
-            epoch_time_str = time.strftime('%H:%M:%S', time.gmtime(epoch_time))
-            self.progbar.close()
-            
-            print(f"\nEpoch {epoch + 1} completed in {epoch_time_str}")
-            print(f"Average batch time: {self.last_batch_time:.2f} seconds")
-            print(f"Validation:")
-            val_progbar = tqdm(total=validation_steps,
-                             desc="Validating",
-                             position=0,
-                             leave=True)
-            val_progbar.update(validation_steps)
-            val_progbar.set_postfix({
-                'val_loss': f"{logs.get('val_loss', 0):.4f}",
-                'val_accuracy': f"{logs.get('val_accuracy', 0):.4f}"
-            })
-            val_progbar.close()
+            try:
+                epoch_time = time.time() - self.epoch_start_time
+                epoch_time_str = time.strftime('%H:%M:%S', time.gmtime(epoch_time))
+                self.progbar.close()
+                
+                print(f"\nEpoch {epoch + 1} completed in {epoch_time_str}")
+                print(f"Average batch time: {self.last_batch_time:.2f} seconds")
+                print(f"Validation:")
+                val_progbar = tqdm(total=validation_steps,
+                                 desc="Validating",
+                                 position=0,
+                                 leave=True)
+                val_progbar.update(validation_steps)
+                val_progbar.set_postfix({
+                    'val_loss': f"{logs.get('val_loss', 0):.4f}",
+                    'val_accuracy': f"{logs.get('val_accuracy', 0):.4f}"
+                })
+                val_progbar.close()
+                
+                # Save epoch checkpoint
+                epoch_path = os.path.join(output_dir, f'epoch_{epoch + 1}.keras')
+                self.model.save(epoch_path)
+                print(f"Saved epoch checkpoint to {epoch_path}")
+                
+            except Exception as e:
+                print(f"\nError at end of epoch {epoch}: {str(e)}")
+                # Save model state on error
+                try:
+                    error_path = os.path.join(output_dir, f'error_state_epoch_{epoch}.keras')
+                    self.model.save(error_path)
+                    print(f"Saved error state to {error_path}")
+                except:
+                    print("Failed to save error state")
+                raise e
     
     # Callbacks
     checkpoint = ModelCheckpoint(
