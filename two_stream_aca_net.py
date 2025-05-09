@@ -358,9 +358,8 @@ class DataGenerator(Sequence):
         valid_y = []
         skipped_count = 0
         
-        # Print progress for first batch only
-        if index == 0:
-            print(f"\nProcessing batch {index + 1}/{self._batch_count}")
+        # Print progress for each batch
+        print(f"\rProcessing batch {index + 1}/{self._batch_count}", end="", flush=True)
     
         for video_path, label in zip(batch_video_paths, batch_labels):
             try:
