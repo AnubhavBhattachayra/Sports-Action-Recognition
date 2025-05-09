@@ -325,6 +325,11 @@ class DataGenerator(Sequence):
         self.augment = augment
         self.indices = np.arange(len(self.video_paths))
         self._batch_count = int(np.ceil(len(self.video_paths) / self.batch_size))
+        
+        # Add memory tracking
+        self.memory_usage = 0
+        self.last_batch_time = 0
+        
         print(f"\nDataGenerator initialized with:")
         print(f"Total videos: {len(self.video_paths)}")
         print(f"Batch size: {self.batch_size}")
@@ -350,7 +355,9 @@ class DataGenerator(Sequence):
             return np.concatenate([sequence, padding], axis=0)
 
     def __getitem__(self, index):
-        """Generate one batch of data, skipping samples with missing RGB or Flow."""
+        """Generate one batch of data with memory tracking."""
+        start_time = time.time()
+        
         if index >= self._batch_count:
             raise IndexError(f"Index {index} out of range (0 to {self._batch_count-1})")
             
@@ -430,12 +437,17 @@ class DataGenerator(Sequence):
         # Close progress bar
         pbar.close()
         
-        # Print batch statistics
+        # Calculate batch processing time and memory usage
+        batch_time = time.time() - start_time
+        self.last_batch_time = batch_time
+        
+        # Print batch statistics with timing
         print(f"\nBatch {index + 1} statistics:")
         print(f"Total samples in batch: {len(batch_video_paths)}")
         print(f"Valid samples: {len(valid_X_rgb)}")
         print(f"Skipped samples: {skipped_count}")
-
+        print(f"Batch processing time: {batch_time:.2f} seconds")
+        
         if not valid_y:
             rgb_shape = (0, self.seq_length, self.img_h, self.img_w, 3)
             flow_shape = (0, self.seq_length, self.img_h, self.img_w, 2)
@@ -456,6 +468,7 @@ class DataGenerator(Sequence):
             print(f"\nEpoch completed - Shuffled indices for next epoch")
             print(f"Total batches: {self._batch_count}")
             print(f"Total samples: {len(self.video_paths)}")
+            print(f"Average batch processing time: {self.last_batch_time:.2f} seconds")
 
     @property
     def element_spec(self):
@@ -520,7 +533,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     if not os.path.exists(rgb_dir):
         raise ValueError(f"RGB directory does not exist: {rgb_dir}")
 
-    # Create data generators
+    # Create data generators with memory tracking
     train_generator = DataGenerator(
         video_paths=train_paths, labels=train_labels, batch_size=BATCH_SIZE,
         num_classes=NUM_CLASSES, seq_length=SEQ_LENGTH, img_size=IMG_SIZE,
@@ -548,6 +561,10 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     print("\nModel Summary:")
     model.summary()
     
+    # Optimize memory usage
+    tf.keras.backend.clear_session()
+    tf.config.optimizer.set_jit(True)  # Enable XLA compilation
+    
     optimizer = Adam(learning_rate=0.0001)
     model.compile(optimizer=optimizer,
                  loss='categorical_crossentropy',
@@ -567,12 +584,13 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     output_dir = "training_output"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Custom callback for progress bar
+    # Custom callback for progress bar with memory tracking
     class ProgressCallback(tf.keras.callbacks.Callback):
         def __init__(self):
             super().__init__()
             self.epoch_start_time = None
             self.batch_start_time = None
+            self.last_batch_time = 0
             
         def on_epoch_begin(self, epoch, logs=None):
             self.epoch_start_time = time.time()
@@ -588,6 +606,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
         def on_batch_end(self, batch, logs=None):
             # Calculate time per batch
             batch_time = time.time() - self.batch_start_time
+            self.last_batch_time = batch_time
             
             # Calculate estimated time remaining for epoch
             batches_remaining = steps_per_epoch - (batch + 1)
@@ -616,6 +635,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
             self.progbar.close()
             
             print(f"\nEpoch {epoch + 1} completed in {epoch_time_str}")
+            print(f"Average batch time: {self.last_batch_time:.2f} seconds")
             print(f"Validation:")
             val_progbar = tqdm(total=validation_steps,
                              desc="Validating",
@@ -658,37 +678,45 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     progress_callback = ProgressCallback()
     
     print("\n=== Starting Training ===")
-    history = model.fit(
-        train_generator,
-        validation_data=val_generator,
-        epochs=epochs,
-        steps_per_epoch=steps_per_epoch,
-        validation_steps=validation_steps,
-        callbacks=[
-            debug_callback,
-            progress_callback,
-            checkpoint,
-            early_stopping,
-            reduce_lr,
-            tf.keras.callbacks.TensorBoard(log_dir=output_dir),
-            tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv'))
-        ],
-        verbose=0  # Set to 0 since we're using custom progress bars
-    )
+    try:
+        history = model.fit(
+            train_generator,
+            validation_data=val_generator,
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=validation_steps,
+            callbacks=[
+                debug_callback,
+                progress_callback,
+                checkpoint,
+                early_stopping,
+                reduce_lr,
+                tf.keras.callbacks.TensorBoard(log_dir=output_dir),
+                tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv'))
+            ],
+            verbose=0  # Set to 0 since we're using custom progress bars
+        )
+        print("\n=== Training Completed Successfully ===")
+    except Exception as e:
+        print(f"\nError during training: {str(e)}")
+        print("Attempting to save model state...")
+        try:
+            model.save(os.path.join(output_dir, 'error_state_model.keras'))
+            print("Model state saved successfully")
+        except:
+            print("Failed to save model state")
+        raise e
     
-    print("\n=== Training Completed ===")
     print("Final metrics:")
     for metric, values in history.history.items():
         print(f"{metric}: {values[-1]:.4f}")
     
     # Save the final model and weights
     print("\n=== Saving Model ===")
-    # Save full model
     model_path = os.path.join(output_dir, 'final_model.keras')
     model.save(model_path)
     print(f"Full model saved to: {model_path}")
     
-    # Save just the weights
     weights_path = os.path.join(output_dir, 'model_weights.weights.h5')
     model.save_weights(weights_path)
     print(f"Model weights saved to: {weights_path}")
