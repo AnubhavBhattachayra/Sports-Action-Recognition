@@ -809,7 +809,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Two-Stream ACA-Net on Basketball-51.")
-    parser.add_argument('--dataset_path', type=str, default='/kaggle/input/basketball-51/Basketball-51',
+    parser.add_argument('--dataset_path', type=str, default=r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51',
                         help='Path to the root directory of the Basketball-51 video dataset.')
     parser.add_argument('--flow_path', type=str, default=FLOW_DIR,
                         help='Path to the directory containing precomputed flow .npy files.')
