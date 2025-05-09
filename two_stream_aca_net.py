@@ -566,6 +566,36 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     output_dir = "training_output"
     os.makedirs(output_dir, exist_ok=True)
     
+    # Custom callback for progress bar
+    class ProgressCallback(tf.keras.callbacks.Callback):
+        def on_epoch_begin(self, epoch, logs=None):
+            print(f"\nEpoch {epoch + 1}/{epochs}")
+            self.progbar = tqdm(total=steps_per_epoch, 
+                              desc="Training",
+                              position=0,
+                              leave=True)
+            
+        def on_batch_end(self, batch, logs=None):
+            self.progbar.update(1)
+            self.progbar.set_postfix({
+                'loss': f"{logs.get('loss', 0):.4f}",
+                'accuracy': f"{logs.get('accuracy', 0):.4f}"
+            })
+            
+        def on_epoch_end(self, epoch, logs=None):
+            self.progbar.close()
+            print(f"\nValidation:")
+            val_progbar = tqdm(total=validation_steps,
+                             desc="Validating",
+                             position=0,
+                             leave=True)
+            val_progbar.update(validation_steps)
+            val_progbar.set_postfix({
+                'val_loss': f"{logs.get('val_loss', 0):.4f}",
+                'val_accuracy': f"{logs.get('val_accuracy', 0):.4f}"
+            })
+            val_progbar.close()
+    
     # Callbacks
     checkpoint = ModelCheckpoint(
         os.path.join(output_dir, "two_stream_aca_net_best.keras"),
@@ -593,6 +623,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     
     # Add debug callback
     debug_callback = DebugCallback()
+    progress_callback = ProgressCallback()
     
     print("\n=== Starting Training ===")
     history = model.fit(
@@ -603,14 +634,14 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
         validation_steps=validation_steps,
         callbacks=[
             debug_callback,
+            progress_callback,
             checkpoint,
             early_stopping,
             reduce_lr,
-            tf.keras.callbacks.ProgbarLogger(),
             tf.keras.callbacks.TensorBoard(log_dir=output_dir),
             tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv'))
         ],
-        verbose=1  # Show progress bar
+        verbose=0  # Set to 0 since we're using custom progress bars
     )
     
     print("\n=== Training Completed ===")
