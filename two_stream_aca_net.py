@@ -332,6 +332,17 @@ class DataGenerator(Sequence):
         """Number of batches per epoch."""
         return int(np.floor(len(self.video_paths) / self.batch_size))
 
+    def pad_sequence(self, sequence, target_length):
+        """Pad or truncate a sequence to match the target length."""
+        if len(sequence) >= target_length:
+            # Truncate to target length
+            return sequence[:target_length]
+        else:
+            # Pad by repeating the last frame
+            padding_needed = target_length - len(sequence)
+            padding = np.tile(sequence[-1:], (padding_needed, 1, 1, 1))
+            return np.concatenate([sequence, padding], axis=0)
+
     def __getitem__(self, index):
         """Generate one batch of data, skipping samples with missing RGB or Flow."""
         batch_indices = self.indices[index*self.batch_size:(index+1)*self.batch_size]
@@ -350,10 +361,10 @@ class DataGenerator(Sequence):
                 base_filename = os.path.splitext(os.path.basename(relative_path))[0]
                 flow_filename = os.path.join(self.flow_dir,
                                              os.path.dirname(relative_path),
-                                             f"{base_filename}_flow.npz")  # Changed to .npz
+                                             f"{base_filename}_flow.npz")
                 rgb_filename = os.path.join(self.rgb_dir,
                                             os.path.dirname(relative_path),
-                                            f"{base_filename}_rgb.npz")    # Changed to .npz
+                                            f"{base_filename}_rgb.npz")
 
                 # Debug: Print paths for first batch only
                 if index == 0 and len(valid_X_rgb) == 0:
@@ -385,11 +396,15 @@ class DataGenerator(Sequence):
                 if index == 0 and len(valid_X_rgb) == 0:
                     print(f"Loaded shapes - RGB: {rgb_sequence.shape}, Flow: {flow_sequence.shape}")
 
-                # Check shapes
+                # Ensure both sequences are exactly SEQ_LENGTH frames
+                rgb_sequence = self.pad_sequence(rgb_sequence, self.seq_length)
+                flow_sequence = self.pad_sequence(flow_sequence, self.seq_length)
+
+                # Check shapes after padding
                 expected_rgb_shape = (self.seq_length, self.img_h, self.img_w, 3)
                 expected_flow_shape = (self.seq_length, self.img_h, self.img_w, 2)
                 if rgb_sequence.shape != expected_rgb_shape or flow_sequence.shape != expected_flow_shape:
-                    print(f"Warning: Shape mismatch for {base_filename}. Skipping.")
+                    print(f"Warning: Shape mismatch for {base_filename} after padding. Skipping.")
                     print(f"  RGB shape: {rgb_sequence.shape}, Expected: {expected_rgb_shape}")
                     print(f"  Flow shape: {flow_sequence.shape}, Expected: {expected_flow_shape}")
                     skipped_count += 1
