@@ -342,7 +342,7 @@ class DataGenerator(Sequence):
         valid_X_flow = []
         valid_y = []
         skipped_count = 0
-
+    
         for video_path, label in zip(batch_video_paths, batch_labels):
             try:
                 # 1. Construct expected paths for BOTH precomputed files
@@ -453,7 +453,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     print(f"Sequence length: {SEQ_LENGTH}")
     print(f"Image size: {IMG_SIZE}")
     print("=============================\n")
-
+    
     # Verify directories exist
     if not os.path.exists(flow_dir):
         raise ValueError(f"Flow directory does not exist: {flow_dir}")
