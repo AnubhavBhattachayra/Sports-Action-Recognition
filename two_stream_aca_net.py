@@ -322,7 +322,7 @@ class DataGenerator(Sequence):
         self.dataset_base_path = dataset_base_path
         self.augment = augment
         self.indices = np.arange(len(self.video_paths))
-        self._batch_count = len(self)  # Store total number of batches
+        self._batch_count = int(np.ceil(len(self.video_paths) / self.batch_size))  # Correct batch count calculation
         print(f"\nDataGenerator initialized with:")
         print(f"Total videos: {len(self.video_paths)}")
         print(f"Batch size: {self.batch_size}")
@@ -334,7 +334,7 @@ class DataGenerator(Sequence):
 
     def __len__(self):
         """Number of batches per epoch."""
-        return int(np.floor(len(self.video_paths) / self.batch_size))
+        return self._batch_count
 
     def pad_sequence(self, sequence, target_length):
         """Pad or truncate a sequence to match the target length."""
@@ -349,6 +349,9 @@ class DataGenerator(Sequence):
 
     def __getitem__(self, index):
         """Generate one batch of data, skipping samples with missing RGB or Flow."""
+        if index >= self._batch_count:
+            raise IndexError(f"Index {index} out of range (0 to {self._batch_count-1})")
+            
         batch_indices = self.indices[index*self.batch_size:(index+1)*self.batch_size]
         batch_video_paths = [self.video_paths[k] for k in batch_indices]
         batch_labels = [self.labels[k] for k in batch_indices]
