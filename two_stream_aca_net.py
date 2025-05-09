@@ -459,6 +459,40 @@ class DataGenerator(Sequence):
         # Return as tuple: ((feature_specs), label_spec)
         return ((rgb_spec, flow_spec), label_spec)
 
+class DebugCallback(tf.keras.callbacks.Callback):
+    def on_train_begin(self, logs=None):
+        print("\n=== Training Started ===")
+        print("Model configuration:")
+        print(f"Input shapes:")
+        for i, input_shape in enumerate(self.model.input_shape):
+            print(f"  Input {i}: {input_shape}")
+        print(f"Output shape: {self.model.output_shape}")
+        print("======================\n")
+
+    def on_epoch_begin(self, epoch, logs=None):
+        print(f"\n=== Starting Epoch {epoch + 1} ===")
+        print("Current learning rate:", float(self.model.optimizer.learning_rate))
+
+    def on_batch_begin(self, batch, logs=None):
+        if batch == 0:
+            print("\nFirst batch shapes:")
+            print(f"RGB data shape: {self.model.input[0].shape}")
+            print(f"Flow data shape: {self.model.input[1].shape}")
+            print(f"Labels shape: {self.model.output.shape}")
+
+    def on_batch_end(self, batch, logs=None):
+        if batch == 0:
+            print("\nFirst batch metrics:")
+            for metric, value in logs.items():
+                print(f"{metric}: {value:.4f}")
+
+    def on_epoch_end(self, epoch, logs=None):
+        print(f"\n=== Completed Epoch {epoch + 1} ===")
+        print("Metrics:")
+        for metric, value in logs.items():
+            print(f"{metric}: {value:.4f}")
+        print("======================\n")
+
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                              flow_dir, rgb_dir, dataset_base_path, epochs=30):
     """Train the Two-Stream ACA-Net using data generators."""
@@ -479,29 +513,6 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     if not os.path.exists(rgb_dir):
         raise ValueError(f"RGB directory does not exist: {rgb_dir}")
 
-    # Verify sample files exist
-    sample_flow = os.path.join(flow_dir, "2p0", "2p0_v168_012503_x264_flow.npy")
-    sample_rgb = os.path.join(rgb_dir, "2p0", "2p0_v168_012503_x264_rgb.npy")
-    
-    print("\nVerifying sample files:")
-    print(f"Sample flow file exists: {os.path.exists(sample_flow)}")
-    print(f"Sample RGB file exists: {os.path.exists(sample_rgb)}")
-    
-    if not os.path.exists(sample_flow) or not os.path.exists(sample_rgb):
-        print("\nWARNING: Sample files not found. Please verify:")
-        print("1. The precomputed data was properly uploaded to Kaggle")
-        print("2. The directory structure matches the original dataset")
-        print("3. The file naming convention is correct (_flow.npy and _rgb.npy)")
-        print("\nExpected structure:")
-        print(f"{flow_dir}/")
-        print("  ├── 2p0/")
-        print("  │   └── 2p0_v168_012503_x264_flow.npy")
-        print("  └── ...")
-        print(f"{rgb_dir}/")
-        print("  ├── 2p0/")
-        print("  │   └── 2p0_v168_012503_x264_rgb.npy")
-        print("  └── ...")
-
     # Create data generators
     train_generator = DataGenerator(
         video_paths=train_paths, labels=train_labels, batch_size=BATCH_SIZE,
@@ -519,15 +530,21 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     # Build and compile model
     rgb_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 3)
     flow_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 2)
+    
+    print("\n=== Building Model ===")
+    print(f"RGB input shape: {rgb_shape}")
+    print(f"Flow input shape: {flow_shape}")
+    
     model = build_two_stream_aca_net(rgb_shape, flow_shape, NUM_CLASSES)
     
-    optimizer = Adam(learning_rate=0.0001)
-    model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
-    
     # Print model summary
-    print("\n=== Model Architecture ===")
+    print("\nModel Summary:")
     model.summary()
-    print("=========================\n")
+    
+    optimizer = Adam(learning_rate=0.0001)
+    model.compile(optimizer=optimizer,
+                 loss='categorical_crossentropy',
+                 metrics=['accuracy'])
     
     # Calculate steps
     steps_per_epoch = len(train_generator)
@@ -539,21 +556,13 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     print(f"Total epochs: {epochs}")
     print("===========================\n")
 
-    # Callbacks with debug prints
-    class DebugCallback(tf.keras.callbacks.Callback):
-        def on_epoch_begin(self, epoch, logs=None):
-            print(f"\nStarting epoch {epoch + 1}/{epochs}")
-            print("Loading training data...")
-            
-        def on_epoch_end(self, epoch, logs=None):
-            print(f"\nCompleted epoch {epoch + 1}/{epochs}")
-            print(f"Training loss: {logs.get('loss'):.4f}")
-            print(f"Training accuracy: {logs.get('accuracy'):.4f}")
-            print(f"Validation loss: {logs.get('val_loss'):.4f}")
-            print(f"Validation accuracy: {logs.get('val_accuracy'):.4f}")
-
+    # Create output directory for logs and checkpoints
+    output_dir = "training_output"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Callbacks
     checkpoint = ModelCheckpoint(
-        "two_stream_aca_net_best.keras",
+        os.path.join(output_dir, "two_stream_aca_net_best.keras"),
         monitor='val_accuracy',
         save_best_only=True,
         mode='max',
@@ -579,16 +588,41 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
     # Add debug callback
     debug_callback = DebugCallback()
     
-    print("\nStarting training...")
+    print("\n=== Starting Training ===")
     history = model.fit(
         train_generator,
         validation_data=val_generator,
         epochs=epochs,
         steps_per_epoch=steps_per_epoch,
         validation_steps=validation_steps,
-        callbacks=[checkpoint, early_stopping, reduce_lr, debug_callback],
+        callbacks=[
+            debug_callback,
+            checkpoint,
+            early_stopping,
+            reduce_lr,
+            tf.keras.callbacks.ProgbarLogger(),
+            tf.keras.callbacks.TensorBoard(log_dir=output_dir),
+            tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv'))
+        ],
         verbose=1
     )
+    
+    print("\n=== Training Completed ===")
+    print("Final metrics:")
+    for metric, values in history.history.items():
+        print(f"{metric}: {values[-1]:.4f}")
+    
+    # Save the final model and weights
+    print("\n=== Saving Model ===")
+    # Save full model
+    model_path = os.path.join(output_dir, 'final_model.keras')
+    model.save(model_path)
+    print(f"Full model saved to: {model_path}")
+    
+    # Save just the weights
+    weights_path = os.path.join(output_dir, 'model_weights.weights.h5')
+    model.save_weights(weights_path)
+    print(f"Model weights saved to: {weights_path}")
     
     return model, history
 
