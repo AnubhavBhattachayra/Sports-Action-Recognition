@@ -38,7 +38,7 @@ SEQ_LENGTH = 50
 IMG_SIZE = (120, 160) # height, width for Keras layers
 IMG_SIZE_CV = (160, 120) # width, height for cv2.resize
 NUM_CLASSES = 8
-BATCH_SIZE = 16
+BATCH_SIZE = 8  # Reduced from 16 to 8 for CPU
 WEIGHT_DECAY = 1e-4
 FLOW_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'  # Updated to subset path
 RGB_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'   # Updated to subset path
@@ -224,38 +224,30 @@ def build_aca_net_stream(input_shape, name_prefix="rgb"):
     return model
 
 def build_two_stream_aca_net(rgb_shape, flow_shape, num_classes=NUM_CLASSES):
-    """
-    Build the complete Two-Stream ACA-Net using ResNet50 backbones.
-    
-    Args:
-        rgb_shape: Shape of RGB input (seq_len, height, width, 3)
-        flow_shape: Shape of optical flow input (seq_len, height, width, 2)
-        num_classes: Number of output classes
-        
-    Returns:
-        Complete Two-Stream ACA-Net model
-    """
-    # Build RGB stream
+    """Build the complete Two-Stream ACA-Net using ResNet50 backbones."""
+    # Build RGB stream with memory optimization
     rgb_stream = build_aca_net_stream(rgb_shape, name_prefix="rgb")
     rgb_input = rgb_stream.input
-    rgb_features = rgb_stream.output # Shape: (batch, 2048)
+    rgb_features = rgb_stream.output
+    
+    # Clear memory after RGB stream
+    tf.keras.backend.clear_session()
+    gc.collect()
     
     # Build Flow stream
     flow_stream = build_aca_net_stream(flow_shape, name_prefix="flow")
     flow_input = flow_stream.input
-    flow_features = flow_stream.output # Shape: (batch, 2048)
+    flow_features = flow_stream.output
     
-    # Concatenate features from both streams (2048 + 2048 = 4096)
-    concat_features = Concatenate(name="fusion_concat")([rgb_features, flow_features]) # Shape: (batch, 4096)
+    # Concatenate features
+    concat_features = Concatenate(name="fusion_concat")([rgb_features, flow_features])
     
-    # Fully connected layers for classification as specified in the document
-    x = Dense(1024, activation='relu', kernel_regularizer=l2(WEIGHT_DECAY), name="fusion_fc1")(concat_features)
-    x = Dropout(0.5, name="fusion_dropout")(x) # Added dropout as specified
-    outputs = Dense(num_classes, activation='softmax', name="fusion_output")(x) # Use num_classes
+    # Simplified FC layers for CPU
+    x = Dense(512, activation='relu', kernel_regularizer=l2(WEIGHT_DECAY), name="fusion_fc1")(concat_features)
+    x = Dropout(0.5, name="fusion_dropout")(x)
+    outputs = Dense(num_classes, activation='softmax', name="fusion_output")(x)
     
-    # Create the final model with two inputs
     model = Model(inputs=[rgb_input, flow_input], outputs=outputs, name="two_stream_aca_net")
-    
     return model
 
 def normalize_flow(flow_sequence):
@@ -545,6 +537,11 @@ class DebugCallback(tf.keras.callbacks.Callback):
 def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
                              flow_dir, rgb_dir, dataset_base_path, epochs=30):
     """Train the Two-Stream ACA-Net using data generators."""
+    # Memory optimization for CPU
+    tf.config.optimizer.set_jit(False)  # Disable XLA for CPU
+    tf.config.threading.set_inter_op_parallelism_threads(4)  # Limit threads
+    tf.config.threading.set_intra_op_parallelism_threads(4)
+    
     print(f"\n=== Training Configuration ===")
     print(f"Training samples: {len(train_paths)}")
     print(f"Validation samples: {len(val_paths)}")
