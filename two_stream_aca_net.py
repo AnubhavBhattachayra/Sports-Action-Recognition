@@ -322,7 +322,11 @@ class DataGenerator(Sequence):
         self.dataset_base_path = dataset_base_path
         self.augment = augment
         self.indices = np.arange(len(self.video_paths))
-        print(f"DataGenerator initialized with {len(self.video_paths)} videos")
+        self._batch_count = len(self)  # Store total number of batches
+        print(f"\nDataGenerator initialized with:")
+        print(f"Total videos: {len(self.video_paths)}")
+        print(f"Batch size: {self.batch_size}")
+        print(f"Batches per epoch: {self._batch_count}")
         print(f"Flow directory: {self.flow_dir}")
         print(f"RGB directory: {self.rgb_dir}")
         if self.augment:
@@ -353,6 +357,10 @@ class DataGenerator(Sequence):
         valid_X_flow = []
         valid_y = []
         skipped_count = 0
+        
+        # Print progress for first batch only
+        if index == 0:
+            print(f"\nProcessing batch {index + 1}/{self._batch_count}")
     
         for video_path, label in zip(batch_video_paths, batch_labels):
             try:
@@ -427,7 +435,7 @@ class DataGenerator(Sequence):
                 
         # Print batch statistics for first batch
         if index == 0:
-            print(f"\nBatch {index} statistics:")
+            print(f"\nBatch {index + 1} statistics:")
             print(f"Total samples in batch: {len(batch_video_paths)}")
             print(f"Valid samples: {len(valid_X_rgb)}")
             print(f"Skipped samples: {skipped_count}")
@@ -449,6 +457,9 @@ class DataGenerator(Sequence):
         """Shuffle indices after each epoch only for training."""
         if self.augment: # Only shuffle if it's the training generator
             np.random.shuffle(self.indices)
+            print(f"\nEpoch completed - Shuffled indices for next epoch")
+            print(f"Total batches: {self._batch_count}")
+            print(f"Total samples: {len(self.video_paths)}")
 
     @property
     def element_spec(self):
