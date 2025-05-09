@@ -495,16 +495,44 @@ class DebugCallback(tf.keras.callbacks.Callback):
 
     def on_batch_begin(self, batch, logs=None):
         if batch == 0:
-            print("\nFirst batch shapes:")
-            print(f"RGB data shape: {self.model.input[0].shape}")
-            print(f"Flow data shape: {self.model.input[1].shape}")
-            print(f"Labels shape: {self.model.output.shape}")
-
+            print("\nProcessing first batch...")
+            print("1. Loading data...")
+            print("2. Initializing model layers...")
+            print("3. Computing first forward pass...")
+            print("4. Computing gradients...")
+            print("5. Updating weights...")
+            print("This may take a few minutes for the first batch.")
+        self.batch_start_time = time.time()
+            
     def on_batch_end(self, batch, logs=None):
+        # Calculate time per batch
+        batch_time = time.time() - self.batch_start_time
+        
         if batch == 0:
-            print("\nFirst batch metrics:")
-            for metric, value in logs.items():
-                print(f"{metric}: {value:.4f}")
+            print("\nFirst batch completed!")
+            print(f"Time taken: {batch_time:.2f} seconds")
+            print("Subsequent batches should be faster.")
+        
+        # Calculate estimated time remaining for epoch
+        batches_remaining = steps_per_epoch - (batch + 1)
+        epoch_time_remaining = batch_time * batches_remaining
+        
+        # Calculate estimated time remaining for all epochs
+        epochs_remaining = epochs - (self.model.epoch + 1)
+        total_time_remaining = epoch_time_remaining + (epochs_remaining * steps_per_epoch * batch_time)
+        
+        # Format times
+        epoch_remaining_str = time.strftime('%H:%M:%S', time.gmtime(epoch_time_remaining))
+        total_remaining_str = time.strftime('%H:%M:%S', time.gmtime(total_time_remaining))
+        
+        self.progbar.update(1)
+        self.progbar.set_postfix({
+            'loss': f"{logs.get('loss', 0):.4f}",
+            'accuracy': f"{logs.get('accuracy', 0):.4f}",
+            'batch_time': f"{batch_time:.1f}s",
+            'epoch_remaining': epoch_remaining_str,
+            'total_remaining': total_remaining_str
+        })
 
     def on_epoch_end(self, epoch, logs=None):
         print(f"\n=== Completed Epoch {epoch + 1} ===")
