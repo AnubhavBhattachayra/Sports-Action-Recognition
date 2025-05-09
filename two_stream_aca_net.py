@@ -600,7 +600,7 @@ def train_two_stream_model(train_paths, train_labels, val_paths, val_labels,
             checkpoint,
             early_stopping,
             reduce_lr,
-            tf.keras.callbacks.ProgbarLogger(count_mode='steps'),
+            tf.keras.callbacks.ProgbarLogger(),
             tf.keras.callbacks.TensorBoard(log_dir=output_dir),
             tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv'))
         ],
