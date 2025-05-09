@@ -350,10 +350,10 @@ class DataGenerator(Sequence):
                 base_filename = os.path.splitext(os.path.basename(relative_path))[0]
                 flow_filename = os.path.join(self.flow_dir,
                                              os.path.dirname(relative_path),
-                                             f"{base_filename}_flow.npy")
+                                             f"{base_filename}_flow.npz")  # Changed to .npz
                 rgb_filename = os.path.join(self.rgb_dir,
                                             os.path.dirname(relative_path),
-                                            f"{base_filename}_rgb.npy")
+                                            f"{base_filename}_rgb.npz")    # Changed to .npz
 
                 # Debug: Print paths for first batch only
                 if index == 0 and len(valid_X_rgb) == 0:
@@ -373,9 +373,13 @@ class DataGenerator(Sequence):
                             print(f"Missing RGB file: {rgb_filename}")
                     continue
 
-                # 3. Load pre-computed RGB
-                rgb_sequence = np.load(rgb_filename)
-                flow_sequence = np.load(flow_filename)
+                # 3. Load pre-computed RGB and Flow from NPZ files
+                rgb_npz = np.load(rgb_filename)
+                flow_npz = np.load(flow_filename)
+                
+                # Get the data array from the NPZ file
+                rgb_sequence = rgb_npz['data'] if 'data' in rgb_npz else rgb_npz['arr_0']
+                flow_sequence = flow_npz['data'] if 'data' in flow_npz else flow_npz['arr_0']
 
                 # Debug shapes for first batch
                 if index == 0 and len(valid_X_rgb) == 0:
