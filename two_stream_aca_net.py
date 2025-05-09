@@ -323,7 +323,7 @@ class DataGenerator(Sequence):
         self.dataset_base_path = dataset_base_path
         self.augment = augment
         self.indices = np.arange(len(self.video_paths))
-        self._batch_count = int(np.ceil(len(self.video_paths) / self.batch_size))  # Correct batch count calculation
+        self._batch_count = int(np.ceil(len(self.video_paths) / self.batch_size))
         print(f"\nDataGenerator initialized with:")
         print(f"Total videos: {len(self.video_paths)}")
         print(f"Batch size: {self.batch_size}")
@@ -362,11 +362,15 @@ class DataGenerator(Sequence):
         valid_y = []
         skipped_count = 0
         
-        # Print progress for each batch
-        print(f"\rProcessing batch {index + 1}/{self._batch_count}", end="", flush=True)
+        # Create progress bar for batch processing
+        pbar = tqdm(batch_video_paths, desc=f"Batch {index + 1}/{self._batch_count}", 
+                   leave=False, position=0)
     
-        for video_path, label in zip(batch_video_paths, batch_labels):
+        for video_path, label in zip(pbar, batch_labels):
             try:
+                # Update progress bar description
+                pbar.set_description(f"Processing {os.path.basename(video_path)}")
+                
                 # 1. Construct expected paths for BOTH precomputed files
                 relative_path = os.path.relpath(video_path, self.dataset_base_path)
                 base_filename = os.path.splitext(os.path.basename(relative_path))[0]
@@ -377,22 +381,10 @@ class DataGenerator(Sequence):
                                             os.path.dirname(relative_path),
                                             f"{base_filename}_rgb.npz")
 
-                # Debug: Print paths for first batch only
-                if index == 0 and len(valid_X_rgb) == 0:
-                    print(f"\nDebug - First sample in batch:")
-                    print(f"Video path: {video_path}")
-                    print(f"Flow file: {flow_filename}")
-                    print(f"RGB file: {rgb_filename}")
-
                 # 2. Check if BOTH files exist
                 if not os.path.exists(flow_filename) or not os.path.exists(rgb_filename):
                     skipped_count += 1
-                    if index == 0:  # Only print for first batch
-                        print(f"Skipping sample - Missing files for {base_filename}")
-                        if not os.path.exists(flow_filename):
-                            print(f"Missing flow file: {flow_filename}")
-                        if not os.path.exists(rgb_filename):
-                            print(f"Missing RGB file: {rgb_filename}")
+                    pbar.set_postfix({"skipped": skipped_count})
                     continue
 
                 # 3. Load pre-computed RGB and Flow from NPZ files
@@ -403,10 +395,6 @@ class DataGenerator(Sequence):
                 rgb_sequence = rgb_npz['data'] if 'data' in rgb_npz else rgb_npz['arr_0']
                 flow_sequence = flow_npz['data'] if 'data' in flow_npz else flow_npz['arr_0']
 
-                # Debug shapes for first batch
-                if index == 0 and len(valid_X_rgb) == 0:
-                    print(f"Loaded shapes - RGB: {rgb_sequence.shape}, Flow: {flow_sequence.shape}")
-
                 # Ensure both sequences are exactly SEQ_LENGTH frames
                 rgb_sequence = self.pad_sequence(rgb_sequence, self.seq_length)
                 flow_sequence = self.pad_sequence(flow_sequence, self.seq_length)
@@ -415,10 +403,8 @@ class DataGenerator(Sequence):
                 expected_rgb_shape = (self.seq_length, self.img_h, self.img_w, 3)
                 expected_flow_shape = (self.seq_length, self.img_h, self.img_w, 2)
                 if rgb_sequence.shape != expected_rgb_shape or flow_sequence.shape != expected_flow_shape:
-                    print(f"Warning: Shape mismatch for {base_filename} after padding. Skipping.")
-                    print(f"  RGB shape: {rgb_sequence.shape}, Expected: {expected_rgb_shape}")
-                    print(f"  Flow shape: {flow_sequence.shape}, Expected: {expected_flow_shape}")
                     skipped_count += 1
+                    pbar.set_postfix({"skipped": skipped_count})
                     continue
 
                 # Process and append valid sample
@@ -430,18 +416,24 @@ class DataGenerator(Sequence):
                 valid_X_rgb.append(rgb_sequence)
                 valid_X_flow.append(flow_sequence)
                 valid_y.append(to_categorical(label, num_classes=self.num_classes))
+                
+                # Update progress bar with success count
+                pbar.set_postfix({"valid": len(valid_X_rgb), "skipped": skipped_count})
 
             except Exception as e:
-                print(f"Error processing {video_path}: {str(e)}")
+                print(f"\nError processing {video_path}: {str(e)}")
                 skipped_count += 1
+                pbar.set_postfix({"skipped": skipped_count})
                 continue
-                
-        # Print batch statistics for first batch
-        if index == 0:
-            print(f"\nBatch {index + 1} statistics:")
-            print(f"Total samples in batch: {len(batch_video_paths)}")
-            print(f"Valid samples: {len(valid_X_rgb)}")
-            print(f"Skipped samples: {skipped_count}")
+        
+        # Close progress bar
+        pbar.close()
+        
+        # Print batch statistics
+        print(f"\nBatch {index + 1} statistics:")
+        print(f"Total samples in batch: {len(batch_video_paths)}")
+        print(f"Valid samples: {len(valid_X_rgb)}")
+        print(f"Skipped samples: {skipped_count}")
 
         if not valid_y:
             rgb_shape = (0, self.seq_length, self.img_h, self.img_w, 3)
