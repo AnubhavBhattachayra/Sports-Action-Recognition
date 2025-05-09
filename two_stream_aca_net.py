@@ -40,6 +40,7 @@ BATCH_SIZE = 16
 WEIGHT_DECAY = 1e-4
 FLOW_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'  # Updated to subset path
 RGB_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'   # Updated to subset path
+DATASET_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51_subset'  # Updated to subset path
 
 # Helper: Ensure correct input shape for TimeDistributed ResNet
 class CorrectShapeLayer(tf.keras.layers.Layer):
@@ -798,7 +799,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Two-Stream ACA-Net on Basketball-51.")
-    parser.add_argument('--dataset_path', type=str, default=r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51',
+    parser.add_argument('--dataset_path', type=str, default=DATASET_DIR,
                         help='Path to the root directory of the Basketball-51 video dataset.')
     parser.add_argument('--flow_path', type=str, default=FLOW_DIR,
                         help='Path to the directory containing precomputed flow .npy files.')
