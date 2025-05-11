@@ -40,9 +40,16 @@ IMG_SIZE_CV = (160, 120) # width, height for cv2.resize
 NUM_CLASSES = 8
 BATCH_SIZE = 8  # Reduced from 16 to 8 for CPU
 WEIGHT_DECAY = 1e-4
-FLOW_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'  # Updated to subset path
-RGB_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'   # Updated to subset path
-DATASET_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51_subset'  # Updated to subset path
+
+# Dataset paths
+FLOW_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'  # 20% subset path
+RGB_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_subset'   # 20% subset path
+DATASET_DIR = r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51_subset'  # 20% subset path
+
+# Tiny dataset paths (0.5%)
+FLOW_DIR_TINY = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_tiny'  # 0.5% subset path
+RGB_DIR_TINY = r'C:\Users\anubh\OneDrive\Desktop\Thesis\precomputed_data_tiny'   # 0.5% subset path
+DATASET_DIR_TINY = r'C:\Users\anubh\OneDrive\Desktop\Thesis\Basketball-51\Basketball-51_tiny'  # 0.5% subset path
 
 # Helper: Ensure correct input shape for TimeDistributed ResNet
 class CorrectShapeLayer(tf.keras.layers.Layer):
@@ -896,6 +903,7 @@ def main(args):
     print(f"Flow Data Path: {args.flow_path}")
     print(f"RGB Data Path: {args.rgb_path}") # Added print for RGB path
     print(f"Epochs: {args.epochs}")
+    print(f"Using tiny dataset: {args.use_tiny_dataset}")
 
     # Check if dataset and flow directories exist
     if not os.path.isdir(args.dataset_path):
@@ -983,7 +991,16 @@ if __name__ == "__main__":
                         help='Path to the directory containing precomputed RGB .npy files.')
     parser.add_argument('--epochs', type=int, default=30,
                         help='Number of training epochs.')
+    parser.add_argument('--use_tiny_dataset', action='store_true',
+                        help='Use 0.5%% tiny dataset instead of 20%% subset.')
     # Add other arguments if needed (e.g., batch size, learning rate)
 
     args = parser.parse_args()
+    
+    # Override paths if using tiny dataset
+    if args.use_tiny_dataset:
+        args.dataset_path = DATASET_DIR_TINY
+        args.flow_path = FLOW_DIR_TINY
+        args.rgb_path = RGB_DIR_TINY
+    
     main(args) 
