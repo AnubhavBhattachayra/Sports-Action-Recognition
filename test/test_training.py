@@ -13,8 +13,13 @@ import random
 # Add parent directory to path to import from two_stream_aca_net.py
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import numpy as np
+# Configure TensorFlow logging
 import tensorflow as tf
+import logging
+tf.get_logger().setLevel(logging.ERROR)  # Only show errors
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=no INFO, 2=no INFO/WARN, 3=no INFO/WARN/ERROR
+
+import numpy as np
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
