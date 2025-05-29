@@ -7,6 +7,8 @@ This helps ensure that data loading, preprocessing, and model training work corr
 """
 import os
 import sys
+import glob
+import random
 
 # Add parent directory to path to import from two_stream_aca_net.py
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +17,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 import argparse
 from two_stream_aca_net import (
     build_two_stream_aca_net,
@@ -72,16 +75,29 @@ class DebugCallback(tf.keras.callbacks.Callback):
         print("======================\n")
 
 class TestDataGenerator(tf.keras.utils.Sequence):
-    def __init__(self, rgb_data, flow_data, y, **kwargs):
-        super().__init__(**kwargs)  # Properly initialize parent class
+    def __init__(self, rgb_data, flow_data, y, validation_split=0.2, **kwargs):
+        super().__init__(**kwargs)
         self.rgb_data = rgb_data
         self.flow_data = flow_data
         self.y = y
-        self._batch_count = 10  # Show 10 batches per epoch
+        self._batch_count = 10
+        self.validation_split = validation_split
+        
+        # Split data into training and validation
+        split_idx = int(len(rgb_data) * (1 - validation_split))
+        self.train_rgb = rgb_data[:split_idx]
+        self.train_flow = flow_data[:split_idx]
+        self.train_y = y[:split_idx]
+        self.val_rgb = rgb_data[split_idx:]
+        self.val_flow = flow_data[split_idx:]
+        self.val_y = y[split_idx:]
+        
         print("\nDataGenerator initialized with:")
         print(f"RGB data shape: {self.rgb_data.shape}")
         print(f"Flow data shape: {self.flow_data.shape}")
         print(f"Labels shape: {self.y.shape}")
+        print(f"Training samples: {len(self.train_rgb)}")
+        print(f"Validation samples: {len(self.val_rgb)}")
         print(f"Number of batches per epoch: {self._batch_count}")
     
     def __len__(self):
@@ -91,14 +107,17 @@ class TestDataGenerator(tf.keras.utils.Sequence):
         if idx >= self._batch_count:
             raise IndexError(f"Index {idx} out of range (0 to {self._batch_count-1})")
         print(f"\rProcessing batch {idx + 1}/{self._batch_count}", end="", flush=True)
-        return (self.rgb_data, self.flow_data), self.y
+        return (self.train_rgb, self.train_flow), self.train_y
+    
+    def get_validation_data(self):
+        return (self.val_rgb, self.val_flow), self.val_y
     
     def on_epoch_end(self):
         print("\nEpoch completed")
         print("Metrics for this epoch:")
         print(f"  - Processed {self._batch_count} batches")
-        print(f"  - Input shapes: RGB {self.rgb_data.shape}, Flow {self.flow_data.shape}")
-        print(f"  - Output shape: {self.y.shape}")
+        print(f"  - Training samples: {len(self.train_rgb)}")
+        print(f"  - Validation samples: {len(self.val_rgb)}")
 
 def test_single_sample_training(rgb_path, flow_path, output_dir):
     """Test training with a single sample."""
@@ -145,8 +164,9 @@ def test_single_sample_training(rgb_path, flow_path, output_dir):
     y[0, 0] = 1  # Set first class as positive
     print(f"Label shape: {y.shape}")
     
-    # Create data generator
-    train_gen = TestDataGenerator(rgb_data, flow_data, y)
+    # Create data generator with validation split
+    train_gen = TestDataGenerator(rgb_data, flow_data, y, validation_split=0.2)
+    val_data = train_gen.get_validation_data()
     
     # Build and compile model
     rgb_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 3)
@@ -162,33 +182,51 @@ def test_single_sample_training(rgb_path, flow_path, output_dir):
     print("\nModel Summary:")
     model.summary()
     
-    # Compile model with more verbose output
+    # Compile model with more metrics
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
     model.compile(optimizer=optimizer,
                  loss='categorical_crossentropy',
-                 metrics=['accuracy'])
+                 metrics=['accuracy', 'categorical_accuracy', 'top_k_categorical_accuracy'])
     
     print("\n=== Starting Training ===")
-    # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Train for 2 epochs with debug callback and verbose output
-    history = model.fit(train_gen,
-                       epochs=2,
-                       verbose=1,  # Changed to 1 for progress bar
-                       callbacks=[
-                           DebugCallback(),
-                           tf.keras.callbacks.ProgbarLogger(),
-                           tf.keras.callbacks.TensorBoard(log_dir=output_dir),
-                           tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv')),
-                           tf.keras.callbacks.ModelCheckpoint(
-                               os.path.join(output_dir, 'best_model.keras'),
-                               monitor='accuracy',
-                               save_best_only=True,
-                               mode='max',
-                               verbose=1
-                           )
-                       ])
+    # Define callbacks
+    callbacks = [
+        DebugCallback(),
+        tf.keras.callbacks.ProgbarLogger(),
+        tf.keras.callbacks.TensorBoard(log_dir=output_dir),
+        tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv')),
+        tf.keras.callbacks.ModelCheckpoint(
+            os.path.join(output_dir, 'best_model.keras'),
+            monitor='val_accuracy',
+            save_best_only=True,
+            mode='max',
+            verbose=1
+        ),
+        EarlyStopping(
+            monitor='val_loss',
+            patience=3,
+            restore_best_weights=True,
+            verbose=1
+        ),
+        ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=2,
+            min_lr=1e-6,
+            verbose=1
+        )
+    ]
+    
+    # Train for 5 epochs with validation
+    history = model.fit(
+        train_gen,
+        validation_data=val_data,
+        epochs=5,
+        verbose=1,
+        callbacks=callbacks
+    )
     
     print("\n=== Training Completed ===")
     print("Final metrics:")
@@ -209,25 +247,189 @@ def test_single_sample_training(rgb_path, flow_path, output_dir):
     
     return model, history
 
+def find_matching_samples(base_dir, num_samples=10):
+    """Find matching RGB and flow sample pairs from the precomputed data."""
+    # Get all RGB files
+    rgb_files = []
+    for action_dir in ['2p0', '2p1', '3p0', '3p1', 'ft0', 'ft1', 'mp0', 'mp1']:
+        rgb_pattern = os.path.join(base_dir, action_dir, f"{action_dir}_*_x264_rgb.npz")
+        rgb_files.extend(glob.glob(rgb_pattern))
+    
+    # Filter out files that don't have matching flow files
+    valid_pairs = []
+    for rgb_file in rgb_files:
+        flow_file = rgb_file.replace('_rgb.npz', '_flow.npz')
+        if os.path.exists(flow_file) and os.path.getsize(rgb_file) > 0 and os.path.getsize(flow_file) > 0:
+            valid_pairs.append((rgb_file, flow_file))
+    
+    # Randomly select num_samples pairs
+    if len(valid_pairs) < num_samples:
+        print(f"Warning: Only found {len(valid_pairs)} valid pairs, using all available")
+        selected_pairs = valid_pairs
+    else:
+        selected_pairs = random.sample(valid_pairs, num_samples)
+    
+    return selected_pairs
+
+def load_and_preprocess_samples(sample_pairs):
+    """Load and preprocess multiple samples."""
+    rgb_samples = []
+    flow_samples = []
+    labels = []
+    
+    for i, (rgb_path, flow_path) in enumerate(sample_pairs):
+        print(f"\nProcessing sample {i+1}/{len(sample_pairs)}")
+        print(f"RGB: {os.path.basename(rgb_path)}")
+        print(f"Flow: {os.path.basename(flow_path)}")
+        
+        # Load data
+        rgb_npz = np.load(rgb_path)
+        flow_npz = np.load(flow_path)
+        
+        # Get data arrays
+        rgb_data = rgb_npz['data'] if 'data' in rgb_npz else rgb_npz['arr_0']
+        flow_data = flow_npz['data'] if 'data' in flow_npz else flow_npz['arr_0']
+        
+        # Pad sequences
+        rgb_data = pad_sequence(rgb_data, SEQ_LENGTH)
+        flow_data = pad_sequence(flow_data, SEQ_LENGTH)
+        
+        # Normalize flow
+        flow_data = normalize_flow(flow_data)
+        
+        rgb_samples.append(rgb_data)
+        flow_samples.append(flow_data)
+        
+        # Create label based on action class (extract from filename)
+        action_class = os.path.basename(rgb_path).split('_')[0]
+        class_idx = {'2p0': 0, '2p1': 1, '3p0': 2, '3p1': 3, 
+                    'ft0': 4, 'ft1': 5, 'mp0': 6, 'mp1': 7}[action_class]
+        label = np.zeros(8)
+        label[class_idx] = 1
+        labels.append(label)
+    
+    # Stack samples into batches
+    rgb_batch = np.stack(rgb_samples)
+    flow_batch = np.stack(flow_samples)
+    labels_batch = np.stack(labels)
+    
+    print(f"\nFinal dataset shapes:")
+    print(f"RGB batch shape: {rgb_batch.shape}")
+    print(f"Flow batch shape: {flow_batch.shape}")
+    print(f"Labels shape: {labels_batch.shape}")
+    
+    return rgb_batch, flow_batch, labels_batch
+
+def test_training(base_dir, output_dir, num_samples=10):
+    """Test training with multiple random samples."""
+    print("\n=== Finding Sample Pairs ===")
+    sample_pairs = find_matching_samples(base_dir, num_samples)
+    
+    print("\n=== Loading and Preprocessing Samples ===")
+    rgb_data, flow_data, y = load_and_preprocess_samples(sample_pairs)
+    
+    # Create data generator with validation split
+    train_gen = TestDataGenerator(rgb_data, flow_data, y, validation_split=0.2)
+    val_data = train_gen.get_validation_data()
+    
+    # Build and compile model
+    rgb_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 3)
+    flow_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 2)
+    
+    print("\n=== Building Model ===")
+    print(f"RGB input shape: {rgb_shape}")
+    print(f"Flow input shape: {flow_shape}")
+    
+    model = build_two_stream_aca_net(rgb_shape, flow_shape)
+    
+    # Print model summary
+    print("\nModel Summary:")
+    model.summary()
+    
+    # Compile model with more metrics
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+    model.compile(optimizer=optimizer,
+                 loss='categorical_crossentropy',
+                 metrics=['accuracy', 'categorical_accuracy', 'top_k_categorical_accuracy'])
+    
+    print("\n=== Starting Training ===")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Define callbacks
+    callbacks = [
+        DebugCallback(),
+        tf.keras.callbacks.ProgbarLogger(),
+        tf.keras.callbacks.TensorBoard(log_dir=output_dir),
+        tf.keras.callbacks.CSVLogger(os.path.join(output_dir, 'training_log.csv')),
+        tf.keras.callbacks.ModelCheckpoint(
+            os.path.join(output_dir, 'best_model.keras'),
+            monitor='val_accuracy',
+            save_best_only=True,
+            mode='max',
+            verbose=1
+        ),
+        EarlyStopping(
+            monitor='val_loss',
+            patience=3,
+            restore_best_weights=True,
+            verbose=1
+        ),
+        ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=2,
+            min_lr=1e-6,
+            verbose=1
+        )
+    ]
+    
+    # Train for 5 epochs with validation
+    history = model.fit(
+        train_gen,
+        validation_data=val_data,
+        epochs=5,
+        verbose=1,
+        callbacks=callbacks
+    )
+    
+    print("\n=== Training Completed ===")
+    print("Final metrics:")
+    for metric, values in history.history.items():
+        print(f"{metric}: {values[-1]:.4f}")
+    
+    # Save the final model and weights
+    print("\n=== Saving Model ===")
+    model_path = os.path.join(output_dir, 'final_model.keras')
+    model.save(model_path)
+    print(f"Full model saved to: {model_path}")
+    
+    weights_path = os.path.join(output_dir, 'model_weights.weights.h5')
+    model.save_weights(weights_path)
+    print(f"Model weights saved to: {weights_path}")
+    
+    return model, history
+
 def main():
-    parser = argparse.ArgumentParser(description="Test model training with a single sample")
-    parser.add_argument('--rgb_path', type=str, required=True,
-                      help='Path to a sample RGB npz file')
-    parser.add_argument('--flow_path', type=str, required=True,
-                      help='Path to the corresponding flow npz file')
-    parser.add_argument('--output_dir', type=str, default='test_output',
-                      help='Directory to save the test model')
+    parser = argparse.ArgumentParser(description="Test model training with multiple samples")
+    parser.add_argument('--base_dir', type=str, required=True,
+                      help='Base directory containing precomputed data')
+    parser.add_argument('--output_dir', type=str, required=True,
+                      help='Directory to save test results')
+    parser.add_argument('--num_samples', type=int, default=10,
+                      help='Number of random samples to use for testing')
+    parser.add_argument('--rgb_path', type=str,
+                      help='Path to a single RGB sample (for backward compatibility)')
+    parser.add_argument('--flow_path', type=str,
+                      help='Path to a single flow sample (for backward compatibility)')
+    
     args = parser.parse_args()
     
-    # Verify input files exist
-    if not os.path.exists(args.rgb_path):
-        print(f"Error: RGB file not found: {args.rgb_path}")
-        return
-    if not os.path.exists(args.flow_path):
-        print(f"Error: Flow file not found: {args.flow_path}")
-        return
-    
-    test_single_sample_training(args.rgb_path, args.flow_path, args.output_dir)
+    if args.rgb_path and args.flow_path:
+        # Use single sample mode for backward compatibility
+        test_single_sample_training(args.rgb_path, args.flow_path, args.output_dir)
+    else:
+        # Use multiple samples mode
+        test_training(args.base_dir, args.output_dir, args.num_samples)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main() 
