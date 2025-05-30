@@ -4,6 +4,7 @@ test_training.py
 
 Test script to verify the model training pipeline using a single sample.
 This helps ensure that data loading, preprocessing, and model training work correctly.
+Optimized for CPU-only training.
 """
 import os
 import sys
@@ -13,11 +14,24 @@ import random
 # Add parent directory to path to import from two_stream_aca_net.py
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Configure TensorFlow logging
+# Configure TensorFlow for CPU-only training
 import tensorflow as tf
 import logging
-tf.get_logger().setLevel(logging.ERROR)  # Only show errors
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=no INFO, 2=no INFO/WARN, 3=no INFO/WARN/ERROR
+tf.get_logger().setLevel(logging.ERROR)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+# CPU-specific optimizations
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'  # Enable oneDNN optimizations for CPU
+os.environ['TF_DISABLE_MKL'] = '0'  # Enable MKL for CPU
+os.environ['TF_NUM_INTEROP_THREADS'] = '4'  # Number of threads for inter-op parallelism
+os.environ['TF_NUM_INTRAOP_THREADS'] = '4'  # Number of threads for intra-op parallelism
+
+# Disable GPU
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+# Configure memory settings
+tf.config.threading.set_inter_op_parallelism_threads(4)
+tf.config.threading.set_intra_op_parallelism_threads(4)
 
 import numpy as np
 from tensorflow.keras.optimizers import Adam
@@ -80,12 +94,12 @@ class DebugCallback(tf.keras.callbacks.Callback):
         print("======================\n")
 
 class TestDataGenerator(tf.keras.utils.Sequence):
-    def __init__(self, rgb_data, flow_data, y, validation_split=0.2, **kwargs):
+    def __init__(self, rgb_data, flow_data, y, validation_split=0.2, batch_size=1, **kwargs):
         super().__init__(**kwargs)
         self.rgb_data = rgb_data
         self.flow_data = flow_data
         self.y = y
-        self._batch_count = 10
+        self.batch_size = batch_size
         self.validation_split = validation_split
         
         # Split data into training and validation
@@ -97,12 +111,16 @@ class TestDataGenerator(tf.keras.utils.Sequence):
         self.val_flow = flow_data[split_idx:]
         self.val_y = y[split_idx:]
         
+        # Calculate number of batches
+        self._batch_count = max(1, len(self.train_rgb) // self.batch_size)
+        
         print("\nDataGenerator initialized with:")
         print(f"RGB data shape: {self.rgb_data.shape}")
         print(f"Flow data shape: {self.flow_data.shape}")
         print(f"Labels shape: {self.y.shape}")
         print(f"Training samples: {len(self.train_rgb)}")
         print(f"Validation samples: {len(self.val_rgb)}")
+        print(f"Batch size: {self.batch_size}")
         print(f"Number of batches per epoch: {self._batch_count}")
     
     def __len__(self):
@@ -111,8 +129,16 @@ class TestDataGenerator(tf.keras.utils.Sequence):
     def __getitem__(self, idx):
         if idx >= self._batch_count:
             raise IndexError(f"Index {idx} out of range (0 to {self._batch_count-1})")
+        
+        start_idx = idx * self.batch_size
+        end_idx = min((idx + 1) * self.batch_size, len(self.train_rgb))
+        
+        batch_rgb = self.train_rgb[start_idx:end_idx]
+        batch_flow = self.train_flow[start_idx:end_idx]
+        batch_y = self.train_y[start_idx:end_idx]
+        
         print(f"\rProcessing batch {idx + 1}/{self._batch_count}", end="", flush=True)
-        return (self.train_rgb, self.train_flow), self.train_y
+        return (batch_rgb, batch_flow), batch_y
     
     def get_validation_data(self):
         return (self.val_rgb, self.val_flow), self.val_y
@@ -325,19 +351,22 @@ def load_and_preprocess_samples(sample_pairs):
     
     return rgb_batch, flow_batch, labels_batch
 
-def test_training(base_dir, output_dir, num_samples=10):
-    """Test training with multiple random samples."""
+def test_training(base_dir, output_dir, num_samples=5):
+    """Test training with multiple random samples, optimized for CPU."""
     print("\n=== Finding Sample Pairs ===")
     sample_pairs = find_matching_samples(base_dir, num_samples)
     
     print("\n=== Loading and Preprocessing Samples ===")
     rgb_data, flow_data, y = load_and_preprocess_samples(sample_pairs)
     
-    # Create data generator with validation split
-    train_gen = TestDataGenerator(rgb_data, flow_data, y, validation_split=0.2)
+    # Create data generator with smaller batch size for CPU
+    train_gen = TestDataGenerator(rgb_data, flow_data, y, validation_split=0.2, batch_size=1)
     val_data = train_gen.get_validation_data()
     
-    # Build and compile model
+    # Clear any existing models and memory
+    tf.keras.backend.clear_session()
+    
+    # Build and compile model with CPU-optimized settings
     rgb_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 3)
     flow_shape = (SEQ_LENGTH, IMG_SIZE[0], IMG_SIZE[1], 2)
     
@@ -347,20 +376,24 @@ def test_training(base_dir, output_dir, num_samples=10):
     
     model = build_two_stream_aca_net(rgb_shape, flow_shape)
     
+    # Disable mixed precision for CPU training
+    tf.keras.mixed_precision.set_global_policy('float32')
+    
     # Print model summary
     print("\nModel Summary:")
     model.summary()
     
-    # Compile model with more metrics
+    # Compile model with CPU-optimized settings
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
     model.compile(optimizer=optimizer,
                  loss='categorical_crossentropy',
-                 metrics=['accuracy', 'categorical_accuracy', 'top_k_categorical_accuracy'])
+                 metrics=['accuracy', 'categorical_accuracy', 'top_k_categorical_accuracy'],
+                 jit_compile=False)  # Disable XLA compilation for CPU stability
     
     print("\n=== Starting Training ===")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Define callbacks
+    # Define callbacks with adjusted patience for CPU training
     callbacks = [
         DebugCallback(),
         tf.keras.callbacks.ProgbarLogger(),
@@ -375,24 +408,24 @@ def test_training(base_dir, output_dir, num_samples=10):
         ),
         EarlyStopping(
             monitor='val_loss',
-            patience=3,
+            patience=5,  # Increased patience for CPU training
             restore_best_weights=True,
             verbose=1
         ),
         ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.5,
-            patience=2,
+            patience=3,  # Increased patience for CPU training
             min_lr=1e-6,
             verbose=1
         )
     ]
     
-    # Train for 5 epochs with validation
+    # Train with adjusted epochs for CPU
     history = model.fit(
         train_gen,
         validation_data=val_data,
-        epochs=5,
+        epochs=10,  # Increased epochs since CPU training is slower
         verbose=1,
         callbacks=callbacks
     )
@@ -415,12 +448,12 @@ def test_training(base_dir, output_dir, num_samples=10):
     return model, history
 
 def main():
-    parser = argparse.ArgumentParser(description="Test model training with multiple samples")
+    parser = argparse.ArgumentParser(description="Test model training with multiple samples (CPU-optimized)")
     parser.add_argument('--base_dir', type=str, required=True,
                       help='Base directory containing precomputed data')
     parser.add_argument('--output_dir', type=str, required=True,
                       help='Directory to save test results')
-    parser.add_argument('--num_samples', type=int, default=10,
+    parser.add_argument('--num_samples', type=int, default=5,
                       help='Number of random samples to use for testing')
     parser.add_argument('--rgb_path', type=str,
                       help='Path to a single RGB sample (for backward compatibility)')
